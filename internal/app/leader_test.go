@@ -103,16 +103,27 @@ func TestHandleKey_LeaderUndoRedo(t *testing.T) {
 	}
 }
 
-// TestHandleKey_LeaderToggleSidebar flips sidebarShown via Esc-t. The
-// toggle is the simplest leader action with no preconditions, so it's
-// the most stable smoke test that the dispatch wiring is intact.
+// TestHandleKey_LeaderFocusSidebar enters explorer navigation via Esc-t.
+func TestHandleKey_LeaderFocusSidebar(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.handleKey(keyEv(tcell.KeyEsc, 0))
+	a.handleKey(keyEv(tcell.KeyRune, 't'))
+	if !a.tree.Focused {
+		t.Fatal("Esc-t should focus the file explorer")
+	}
+	if a.tree.SelectedNode() != a.tree.Root {
+		t.Fatal("explorer focus should start at the active root folder")
+	}
+}
+
+// TestHandleKey_LeaderToggleSidebar keeps the display toggle on shifted T.
 func TestHandleKey_LeaderToggleSidebar(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	before := a.sidebarShown
 	a.handleKey(keyEv(tcell.KeyEsc, 0))
-	a.handleKey(keyEv(tcell.KeyRune, 't'))
+	a.handleKey(keyEv(tcell.KeyRune, 'T'))
 	if a.sidebarShown == before {
-		t.Fatalf("Esc-t should toggle sidebar (still %v)", a.sidebarShown)
+		t.Fatalf("Esc-T should toggle sidebar (still %v)", a.sidebarShown)
 	}
 }
 

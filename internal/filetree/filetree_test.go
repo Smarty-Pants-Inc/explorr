@@ -14,6 +14,7 @@
 package filetree
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -1322,5 +1323,78 @@ func TestFitWidthIgnoresOutliers(t *testing.T) {
 	if tr.FitWidth(0) <= 0 || tr.FitWidth(1000) != max {
 		t.Fatalf("percentile clamping wrong: 0->%d 1000->%d max=%d",
 			tr.FitWidth(0), tr.FitWidth(1000), max)
+	}
+}
+
+func TestKeyboardSelectionMovesThroughVisibleTree(t *testing.T) {
+	root := mkTree(t)
+	tr, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr.Focus(root, 4)
+	if tr.SelectedNode() != tr.Root {
+		t.Fatal("focus should select the project root")
+	}
+	tr.MoveSelection(1, 4)
+	first := tr.SelectedNode()
+	if first == nil || first == tr.Root {
+		t.Fatalf("move selected %#v", first)
+	}
+	tr.SelectParent(4)
+	if tr.SelectedNode() != tr.Root {
+		t.Fatal("parent of a top-level row should be the project root")
+	}
+	if !tr.SelectFirstChild(4) || tr.SelectedNode() != first {
+		t.Fatal("right-style child navigation should return to the first row")
+	}
+}
+
+func TestKeyboardSelectionScrollsAndRendersFocusedRow(t *testing.T) {
+	root := t.TempDir()
+	for i := range 10 {
+		name := fmt.Sprintf("file-%02d.txt", i)
+		if err := os.WriteFile(filepath.Join(root, name), []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tr, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr.Focus(root, 3)
+	tr.SelectLast(3)
+	if tr.ScrollY == 0 {
+		t.Fatal("selecting the last row should scroll a short viewport")
+	}
+
+	cells, w := renderAndCollect(t, tr, 32, 5)
+	selected := tr.SelectedNode()
+	row := findRowY(cells, w, 5, selected.Name)
+	if row < 0 {
+		t.Fatalf("selected row %q is not visible", selected.Name)
+	}
+	_, bg, _ := cells[row*w].Style.Decompose()
+	if bg != theme.Default().LineHL {
+		t.Fatalf("selected row background = %v, want %v", bg, theme.Default().LineHL)
+	}
+}
+
+func TestRefreshFallsBackFromDeletedSelection(t *testing.T) {
+	root := mkTree(t)
+	tr, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alpha := findChild(tr.Root, "alpha")
+	tr.Toggle(alpha)
+	target := findChild(alpha, "inner.go")
+	tr.Focus(target.Path, 10)
+	if err := os.Remove(target.Path); err != nil {
+		t.Fatal(err)
+	}
+	tr.Refresh()
+	if got := tr.SelectedNode(); got != alpha {
+		t.Fatalf("deleted selection fell back to %#v, want parent %#v", got, alpha)
 	}
 }

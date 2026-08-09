@@ -278,9 +278,10 @@ func builtinMenuGroups() [][]menuItemDef {
 			{label: "Toggle line comment", shortcut: "Esc /", action: (*App).menuToggleLineComment, enabled: (*App).hasCommentableTab},
 			{label: "Toggle block comment", action: (*App).menuToggleBlockComment, enabled: (*App).hasCommentableTab},
 		},
-		// View toggle
+		// File explorer
 		{
-			{shortcut: "Esc t", action: (*App).menuToggleSidebar, enabled: alwaysTrue, labelFor: (*App).sidebarToggleLabel, visible: (*App).hasTree},
+			{label: "Navigate file explorer", shortcut: "Esc t", action: (*App).menuFocusSidebar, enabled: alwaysTrue, visible: (*App).hasTree},
+			{shortcut: "Esc T", action: (*App).menuToggleSidebar, enabled: alwaysTrue, labelFor: (*App).sidebarToggleLabel, visible: (*App).hasTree},
 		},
 		// Merge conflicts (fork). Every row is `visible`-gated on the active
 		// tab actually being unmerged according to git, so this whole group —
@@ -1520,6 +1521,13 @@ func (a *App) handleKey(ev *tcell.EventKey) {
 		return
 	}
 
+	// Explorer navigation is a real focus mode, matching HerdR's Navigate
+	// surface: Esc returns to the editor, arrows/hjkl move, and Enter acts.
+	if a.tree != nil && a.tree.Focused {
+		a.handleTreeKey(ev)
+		return
+	}
+
 	// F8 / Shift+F8 — the VS Code muscle memory for next/prev problem. A
 	// bonus path only: Esc . / Esc , (leader.go) and the command palette
 	// fully cover this feature on their own. Placed here, after every modal
@@ -1928,6 +1936,8 @@ func (a *App) tryTreeContextClick(x, y int) bool {
 	if !ok {
 		return false
 	}
+	a.tree.Focused = true
+	a.tree.SelectNode(n, a.treeListHeight())
 	if n.IsDir {
 		a.setActiveFolder(n.Path)
 	} else {
@@ -1950,6 +1960,8 @@ func (a *App) sidebarClick(x, y int) {
 	if !ok {
 		return
 	}
+	a.tree.Focused = true
+	a.tree.SelectNode(n, a.treeListHeight())
 	if n == a.tree.Root {
 		a.setActiveFolder(a.rootDir)
 		return
@@ -1985,6 +1997,7 @@ func (a *App) tabBarClick(x, _ int) {
 		a.openMenu()
 		return
 	}
+	a.tree.Blur()
 	for _, r := range a.lastTabRects {
 		if x >= r.X && x < r.X+r.Width {
 			if x == r.CloseX {
@@ -2015,6 +2028,9 @@ func (a *App) syncActiveTreeFile() {
 // the caret, optionally selecting a word on double-click. Image tabs
 // have no caret, so the press is dropped.
 func (a *App) editorPress(x, y int) {
+	if a.tree != nil {
+		a.tree.Blur()
+	}
 	tab := a.activeTabPtr()
 	if tab == nil || tab.IsImage() {
 		return
@@ -2840,15 +2856,102 @@ func (a *App) menuRefreshTree() {
 	a.flash("File tree refreshed")
 }
 
-// menuToggleSidebar shows or hides the file explorer panel. The editor and
-// tab bar reflow to fill the freed cells when the panel is hidden, and
-// snap back when it returns.
+// menuFocusSidebar enters explorer navigation. If the sidebar was hidden,
+// the same gesture restores it first; panes too narrow to show it explain why
+// instead of accepting keyboard focus on an invisible surface.
+func (a *App) menuFocusSidebar() {
+	a.closeMenu()
+	if a.tree == nil {
+		a.flash("No file explorer in single-file mode")
+		return
+	}
+	a.sidebarShown = true
+	if !a.sidebarVisible() {
+		a.tree.Blur()
+		a.flash(fmt.Sprintf("File explorer is hidden automatically below %d columns (pane is %d)",
+			treeNeeds, a.width))
+		return
+	}
+	path := a.tree.ActiveFile
+	if path == "" {
+		path = a.tree.ActiveFolder
+	}
+	a.tree.Focus(path, a.treeListHeight())
+}
+
+func (a *App) treeListHeight() int {
+	_, _, _, h := a.sidebarRect()
+	return max(0, h-2)
+}
+
+// handleTreeKey implements the same compact navigation vocabulary HerdR uses:
+// Esc leaves, arrows plus hjkl move, and Enter activates the selected row.
+func (a *App) handleTreeKey(ev *tcell.EventKey) {
+	viewH := a.treeListHeight()
+	r := ev.Rune()
+	switch {
+	case ev.Key() == tcell.KeyEsc || ev.Key() == tcell.KeyTab || ev.Key() == tcell.KeyBacktab:
+		a.tree.Blur()
+	case ev.Key() == tcell.KeyUp || r == 'k':
+		a.tree.MoveSelection(-1, viewH)
+	case ev.Key() == tcell.KeyDown || r == 'j':
+		a.tree.MoveSelection(1, viewH)
+	case ev.Key() == tcell.KeyHome:
+		a.tree.SelectFirst(viewH)
+	case ev.Key() == tcell.KeyEnd:
+		a.tree.SelectLast(viewH)
+	case ev.Key() == tcell.KeyPgUp:
+		a.tree.MoveSelection(-max(1, viewH-1), viewH)
+	case ev.Key() == tcell.KeyPgDn:
+		a.tree.MoveSelection(max(1, viewH-1), viewH)
+	case ev.Key() == tcell.KeyLeft || r == 'h':
+		n := a.tree.SelectedNode()
+		if n != nil && n != a.tree.Root && n.IsDir && n.Expanded {
+			a.tree.Toggle(n)
+			a.tree.SelectNode(n, viewH)
+		} else {
+			a.tree.SelectParent(viewH)
+		}
+	case ev.Key() == tcell.KeyRight || r == 'l':
+		n := a.tree.SelectedNode()
+		if n == nil || !n.IsDir {
+			return
+		}
+		if !n.Expanded {
+			a.tree.Toggle(n)
+			a.tree.SelectNode(n, viewH)
+			return
+		}
+		a.tree.SelectFirstChild(viewH)
+	case ev.Key() == tcell.KeyEnter:
+		a.activateTreeSelection(viewH)
+	}
+}
+
+func (a *App) activateTreeSelection(viewH int) {
+	n := a.tree.SelectedNode()
+	if n == nil {
+		return
+	}
+	if n == a.tree.Root {
+		a.setActiveFolder(a.rootDir)
+		return
+	}
+	if n.IsDir {
+		a.setActiveFolder(n.Path)
+		a.tree.Toggle(n)
+		a.tree.SelectNode(n, viewH)
+		return
+	}
+	a.setActiveFolder(filepath.Dir(n.Path))
+	a.openFile(n.Path)
+	a.tree.Blur()
+}
+
+// menuToggleSidebar shows or hides the file explorer panel. Esc-T keeps this
+// display toggle separate from Esc-t, which enters keyboard navigation.
 func (a *App) menuToggleSidebar() {
 	a.closeMenu()
-	// Single-file mode has no file tree, so there's nothing to show or
-	// hide. The menu row is hidden (hasTree), but the Esc-t leader reaches
-	// here directly — guard it so the toggle can't flip sidebarShown true
-	// and send draw() into a.tree.Render on a nil tree.
 	if a.tree == nil {
 		a.flash("No file explorer in single-file mode")
 		return
@@ -2861,6 +2964,9 @@ func (a *App) menuToggleSidebar() {
 		return
 	}
 	a.sidebarShown = !a.sidebarShown
+	if !a.sidebarShown {
+		a.tree.Blur()
+	}
 }
 
 // sidebarToggleLabel returns the label the toggle row should display given
@@ -3119,15 +3225,15 @@ func (a *App) drawTabBar() {
 }
 
 // drawSplitter paints a 1-column vertical line at the right edge of the
-// sidebar. Idle it sits in Subtle grey; while the user is dragging it
-// brightens to Accent so the active grab handle is unmistakable.
+// sidebar. Explorer navigation and resize both brighten it to Accent, matching
+// HerdR's focused-sidebar treatment.
 func (a *App) drawSplitter() {
 	x := a.splitterX()
 	if x < 0 {
 		return
 	}
 	fg := a.theme.Subtle
-	if a.dragMode == "sidebar" {
+	if a.dragMode == "sidebar" || (a.tree != nil && a.tree.Focused) {
 		fg = a.theme.Accent
 	}
 	style := tcell.StyleDefault.Background(a.theme.SidebarBG).Foreground(fg)
@@ -3155,9 +3261,45 @@ func (a *App) drawMenuButton() {
 	a.screen.SetContent(mx+mw/2, my, '≡', nil, style)
 }
 
+func (a *App) drawTreeNavigateStatus(sx, sy, sw int) {
+	base := tcell.StyleDefault.Background(a.theme.StatusBG).Foreground(a.theme.Muted)
+	for cx := sx; cx < sx+sw; cx++ {
+		a.screen.SetContent(cx, sy, ' ', nil, base)
+	}
+	mode := tcell.StyleDefault.Background(a.theme.Accent).Foreground(a.theme.BG).Bold(true)
+	key := tcell.StyleDefault.Background(a.theme.StatusBG).Foreground(a.theme.Accent).Bold(true)
+	dim := tcell.StyleDefault.Background(a.theme.StatusBG).Foreground(a.theme.Muted)
+	cx := sx
+	put := func(text string, style tcell.Style) {
+		for _, r := range text {
+			if cx >= sx+sw {
+				return
+			}
+			a.screen.SetContent(cx, sy, r, nil, style)
+			cx++
+		}
+	}
+	put(" NAVIGATE ", mode)
+	put(" ", dim)
+	put("esc", key)
+	put(" back  ", dim)
+	put("↑/↓ j/k", key)
+	put(" move  ", dim)
+	put("h/l", key)
+	put(" tree  ", dim)
+	put("enter", key)
+	put(" open  ", dim)
+	put("tab", key)
+	put(" editor", dim)
+}
+
 // drawStatusBar paints the bottom status bar.
 func (a *App) drawStatusBar() {
 	sx, sy, sw, _ := a.statusRect()
+	if a.tree != nil && a.tree.Focused {
+		a.drawTreeNavigateStatus(sx, sy, sw)
+		return
+	}
 	bg := a.theme.StatusBG
 	fg := a.theme.BG
 	style := tcell.StyleDefault.Background(bg).Foreground(fg).Bold(true)

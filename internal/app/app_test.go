@@ -1860,21 +1860,21 @@ func TestDrawStatusBar_OmitsBranchWhenEmpty(t *testing.T) {
 // this one pushes dividers 5, 6 and 7 down by one each (47/49/70 -> 48/50/71)
 // as well as the height and the count.
 //
-// Bumped again by the launch.json picker, which added ONE row to the Debug
-// group ("Choose debug configuration...", 63 -> 64 items, modalHeight 74 -> 75).
-// Still that one group, so again only the last divider moves: 71 -> 72.
+// Bumped again by explorer navigation, which adds "Navigate file explorer"
+// beside the existing display toggle (64 -> 65 items, modalHeight 75 -> 76).
+// The two later dividers move down by one.
 func TestMenuLayout_NoCustomActions(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	a.customActions = nil
 	items, dividers, h := a.menuLayout()
 
-	if h != 75 {
-		t.Errorf("modalHeight = %d, want 75", h)
+	if h != 76 {
+		t.Errorf("modalHeight = %d, want 76", h)
 	}
-	if got := len(items); got != 64 {
-		t.Errorf("item count = %d, want 64 built-ins", got)
+	if got := len(items); got != 65 {
+		t.Errorf("item count = %d, want 65 built-ins", got)
 	}
-	wantDiv := []int{2, 6, 10, 34, 42, 48, 50, 72}
+	wantDiv := []int{2, 6, 10, 34, 42, 48, 51, 73}
 	if len(dividers) != len(wantDiv) {
 		t.Fatalf("dividers = %v, want %v", dividers, wantDiv)
 	}
@@ -1912,25 +1912,26 @@ func TestMenuLayout_ToggleLineCommentRow(t *testing.T) {
 func TestMenuLayout_Shortcuts(t *testing.T) {
 	a := newTestApp(t, t.TempDir())
 	want := map[string]string{
-		"Save":                 "Esc s",
-		"Save & close tab":     "",
-		"Close tab":            "Esc w",
-		"Undo":                 "Esc u",
-		"Redo":                 "Esc r",
-		"Revert file":          "",
-		"Find in file":         "Esc f",
-		"Find file in project": "Esc p",
-		"New file":             "Esc n",
-		"Rename file":          "",
-		"Delete file":          "",
-		"Copy relative path":   "",
-		"Copy absolute path":   "",
-		"Copy selection":       "",
-		"Cut selection":        "",
-		"Paste":                "",
-		"Toggle line comment":  "Esc /",
-		"Hide file explorer":   "Esc t",
-		"Quit editor":          "Esc q",
+		"Save":                   "Esc s",
+		"Save & close tab":       "",
+		"Close tab":              "Esc w",
+		"Undo":                   "Esc u",
+		"Redo":                   "Esc r",
+		"Revert file":            "",
+		"Find in file":           "Esc f",
+		"Find file in project":   "Esc p",
+		"New file":               "Esc n",
+		"Rename file":            "",
+		"Delete file":            "",
+		"Copy relative path":     "",
+		"Copy absolute path":     "",
+		"Copy selection":         "",
+		"Cut selection":          "",
+		"Paste":                  "",
+		"Toggle line comment":    "Esc /",
+		"Navigate file explorer": "Esc t",
+		"Hide file explorer":     "Esc T",
+		"Quit editor":            "Esc q",
 	}
 
 	items, _, _ := a.menuLayout()
@@ -2035,8 +2036,8 @@ func TestMenuLayout_WithCustomActions(t *testing.T) {
 	}
 	items, _, h := a.menuLayout()
 
-	if h != 78 { // 75 (see TestMenuLayout_NoCustomActions) + 2 items + 1 divider
-		t.Errorf("modalHeight = %d, want 78", h)
+	if h != 79 { // 76 (see TestMenuLayout_NoCustomActions) + 2 items + 1 divider
+		t.Errorf("modalHeight = %d, want 79", h)
 	}
 	// Custom actions should be the second-to-last and third-to-last
 	// rows, with Quit as the final row.
@@ -2772,5 +2773,86 @@ func TestMenuScroll_KeyboardKeepsSelectionVisible(t *testing.T) {
 			t.Fatalf("selection row %d is outside the visible window (rel=%d, mh=%d)",
 				a.hoveredMenuRow, rel, mh)
 		}
+	}
+}
+
+func TestTreeNavigationOpensFileAndReturnsToEditor(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "main.go")
+	if err := os.WriteFile(target, []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := newTestApp(t, root)
+
+	a.menuFocusSidebar()
+	a.handleTreeKey(keyEv(tcell.KeyDown, 0))
+	if got := a.tree.SelectedNode(); got == nil || got.Path != target {
+		t.Fatalf("Down selected %#v, want %s", got, target)
+	}
+	a.handleTreeKey(keyEv(tcell.KeyEnter, 0))
+
+	if a.tree.Focused {
+		t.Fatal("opening a file should return focus to the editor")
+	}
+	if tab := a.activeTabPtr(); tab == nil || tab.Path != target {
+		t.Fatalf("active tab = %#v, want %s", tab, target)
+	}
+}
+
+func TestTreeNavigationHierarchyKeys(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "pkg")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(dir, "child.go")
+	if err := os.WriteFile(child, []byte("package pkg\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := newTestApp(t, root)
+	a.menuFocusSidebar()
+	a.handleTreeKey(keyEv(tcell.KeyRune, 'j'))
+
+	n := a.tree.SelectedNode()
+	if n == nil || n.Path != dir {
+		t.Fatalf("j selected %#v, want %s", n, dir)
+	}
+	a.handleTreeKey(keyEv(tcell.KeyRune, 'l'))
+	if !n.Expanded {
+		t.Fatal("l should expand a collapsed directory")
+	}
+	a.handleTreeKey(keyEv(tcell.KeyRune, 'l'))
+	if got := a.tree.SelectedNode(); got == nil || got.Path != child {
+		t.Fatalf("second l selected %#v, want %s", got, child)
+	}
+	a.handleTreeKey(keyEv(tcell.KeyRune, 'h'))
+	if got := a.tree.SelectedNode(); got != n {
+		t.Fatalf("h should select parent, got %#v want %#v", got, n)
+	}
+	a.handleTreeKey(keyEv(tcell.KeyRune, 'h'))
+	if n.Expanded {
+		t.Fatal("h should collapse an expanded directory")
+	}
+	a.handleTreeKey(keyEv(tcell.KeyEsc, 0))
+	if a.tree.Focused {
+		t.Fatal("Esc should leave explorer navigation")
+	}
+}
+
+func TestTreeNavigationStatusUsesNativeModeCue(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.menuFocusSidebar()
+	a.draw()
+	a.screen.Show()
+
+	_, sy, _, _ := a.statusRect()
+	if line := screenLine(a.screen.(tcell.SimulationScreen), sy); !strings.Contains(line, "NAVIGATE") || !strings.Contains(line, "esc") {
+		t.Fatalf("navigate status missing mode or exit hint: %q", line)
+	}
+	x := a.splitterX()
+	cells, w, _ := a.screen.(tcell.SimulationScreen).GetContents()
+	fg, _, _ := cells[x].Style.Decompose()
+	if fg != a.theme.Accent {
+		t.Fatalf("focused splitter fg = %v, want accent %v (screen width %d)", fg, a.theme.Accent, w)
 	}
 }

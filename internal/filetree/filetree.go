@@ -68,6 +68,12 @@ type Tree struct {
 	visible []*Node // index = screen row in the list area; nil for blank rows.
 	ScrollY int
 
+	// Focused and SelectedPath are the explorer's keyboard-navigation state.
+	// SelectedPath is stable across refreshes; surviving nodes keep their path,
+	// and a deleted selection falls back to its nearest visible ancestor.
+	Focused      bool
+	SelectedPath string
+
 	// ignore withholds git-ignored paths. Shared by pointer with every Node, so toggling it
 	// reshapes the whole tree on the next reload without rebuilding anything.
 	ignore *ignoreSet
@@ -197,6 +203,9 @@ func (t *Tree) Refresh() {
 		}
 	}
 	refreshNode(t.Root)
+	if t.SelectedPath != "" {
+		t.SelectPath(t.SelectedPath, 0)
+	}
 }
 
 // refreshNode is Tree.Refresh's recursive worker. It reloads only Loaded
@@ -265,12 +274,25 @@ func (t *Tree) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 	// has been selected. Render bold/Accent when it *is* the active
 	// folder, plain text otherwise — same visual rule the children
 	// rows follow, so the highlight is honest.
-	headerStyle := tcell.StyleDefault.Background(bg).Foreground(th.Muted).Bold(true)
+	headerFG := th.Muted
+	if t.Focused {
+		headerFG = th.Accent
+	}
+	headerStyle := tcell.StyleDefault.Background(bg).Foreground(headerFG).Bold(true)
 	drawString(scr, x, y, w, " EXPLORER", headerStyle)
 	rootActive := t.ActiveFolder == "" || t.ActiveFolder == t.Root.Path
-	rootStyle := tcell.StyleDefault.Background(bg).Foreground(th.Text).Bold(true)
-	if rootActive {
-		rootStyle = tcell.StyleDefault.Background(bg).Foreground(th.Accent).Bold(true)
+	rootBG := bg
+	rootSelected := t.Focused && t.SelectedPath == t.Root.Path
+	if rootSelected {
+		rootBG = th.LineHL
+		rootFill := tcell.StyleDefault.Background(rootBG)
+		for cx := x; cx < x+w; cx++ {
+			scr.SetContent(cx, y+1, ' ', nil, rootFill)
+		}
+	}
+	rootStyle := tcell.StyleDefault.Background(rootBG).Foreground(th.Text).Bold(true)
+	if rootActive || rootSelected {
+		rootStyle = rootStyle.Foreground(th.Accent)
 	}
 	if rootChange := t.DirtyFolders[t.Root.Path]; rootChange != GitChangeNone {
 		rootStyle = rootStyle.Foreground(gitChangeColor(th, rootChange))
@@ -299,8 +321,9 @@ func (t *Tree) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 		}
 		item := flat[idx]
 		active := item.Node.Path == t.ActiveFile || (item.Node.IsDir && item.Node.Path == t.ActiveFolder)
+		selected := t.Focused && item.Node.Path == t.SelectedPath
 		change := t.changeKind(item.Node)
-		drawNodeRow(scr, th, x, listTop+row, w, item, active, change, t.IconsEnabled)
+		drawNodeRow(scr, th, x, listTop+row, w, item, active, selected, change, t.IconsEnabled)
 		visible = append(visible, item.Node)
 	}
 	t.visible = visible
@@ -420,8 +443,15 @@ func (t *Tree) FitWidth(percentile int) int {
 	return need
 }
 
-func drawNodeRow(scr tcell.Screen, th theme.Theme, x, y, w int, item flatNode, active bool, change GitChangeKind, withIcons bool) {
+func drawNodeRow(scr tcell.Screen, th theme.Theme, x, y, w int, item flatNode, active, selected bool, change GitChangeKind, withIcons bool) {
 	bg := th.SidebarBG
+	if selected {
+		bg = th.LineHL
+		fill := tcell.StyleDefault.Background(bg)
+		for cx := x; cx < x+w; cx++ {
+			scr.SetContent(cx, y, ' ', nil, fill)
+		}
+	}
 
 	// Compute the row-level foreground via this priority cascade
 	// (highest wins last):
@@ -574,6 +604,162 @@ func (t *Tree) Scroll(delta int) {
 	if t.ScrollY < 0 {
 		t.ScrollY = 0
 	}
+}
+
+// Focus enters keyboard navigation and selects path, or its nearest visible
+// ancestor when the exact row is hidden or gone.
+func (t *Tree) Focus(path string, viewH int) {
+	if t == nil || t.Root == nil {
+		return
+	}
+	t.Focused = true
+	t.SelectPath(path, viewH)
+}
+
+// Blur returns keyboard ownership to the editor without discarding selection.
+func (t *Tree) Blur() {
+	if t != nil {
+		t.Focused = false
+	}
+}
+
+// SelectedNode returns the currently selected node, if it still exists.
+func (t *Tree) SelectedNode() *Node {
+	if t == nil || t.Root == nil || t.SelectedPath == "" {
+		return nil
+	}
+	return nodeByPath(t.Root, t.SelectedPath)
+}
+
+// SelectPath selects path when visible, otherwise walking upward until it
+// finds a visible ancestor. Paths outside the tree select the project root.
+func (t *Tree) SelectPath(path string, viewH int) {
+	if t == nil || t.Root == nil {
+		return
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = t.Root.Path
+	}
+	for {
+		n := nodeByPath(t.Root, abs)
+		if n != nil && (n == t.Root || t.flatIndexOf(n) >= 0) {
+			t.SelectNode(n, viewH)
+			return
+		}
+		if abs == t.Root.Path || !pathWithin(t.Root.Path, abs) {
+			t.SelectNode(t.Root, viewH)
+			return
+		}
+		abs = filepath.Dir(abs)
+	}
+}
+
+// SelectNode selects a visible node and scrolls it into the explorer viewport.
+func (t *Tree) SelectNode(n *Node, viewH int) {
+	if t == nil || n == nil {
+		return
+	}
+	t.SelectedPath = n.Path
+	if n == t.Root || viewH <= 0 {
+		return
+	}
+	idx := t.flatIndexOf(n)
+	if idx < 0 {
+		return
+	}
+	if idx < t.ScrollY {
+		t.ScrollY = idx
+	} else if idx >= t.ScrollY+viewH {
+		t.ScrollY = idx - viewH + 1
+	}
+	t.clampScroll(len(t.navigationNodes())-1, viewH)
+}
+
+// MoveSelection moves by visible rows and clamps at either end.
+func (t *Tree) MoveSelection(delta, viewH int) {
+	nodes := t.navigationNodes()
+	if len(nodes) == 0 {
+		return
+	}
+	idx := 0
+	for i, n := range nodes {
+		if n.Path == t.SelectedPath {
+			idx = i
+			break
+		}
+	}
+	idx += delta
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(nodes) {
+		idx = len(nodes) - 1
+	}
+	t.SelectNode(nodes[idx], viewH)
+}
+
+// SelectFirst and SelectLast jump to the ends of the visible tree.
+func (t *Tree) SelectFirst(viewH int) { t.MoveSelection(-len(t.navigationNodes()), viewH) }
+func (t *Tree) SelectLast(viewH int)  { t.MoveSelection(len(t.navigationNodes()), viewH) }
+
+// SelectParent moves to the selected row's visible parent.
+func (t *Tree) SelectParent(viewH int) {
+	if n := t.SelectedNode(); n != nil && n != t.Root {
+		t.SelectPath(filepath.Dir(n.Path), viewH)
+	}
+}
+
+// SelectFirstChild moves into an expanded directory's first child.
+func (t *Tree) SelectFirstChild(viewH int) bool {
+	n := t.SelectedNode()
+	if n == nil || !n.IsDir || !n.Expanded {
+		return false
+	}
+	if !n.Loaded {
+		_ = loadChildren(n)
+	}
+	if len(n.Children) == 0 {
+		return false
+	}
+	t.SelectNode(n.Children[0], viewH)
+	return true
+}
+
+func (t *Tree) navigationNodes() []*Node {
+	if t == nil || t.Root == nil {
+		return nil
+	}
+	flat := make([]flatNode, 0, 128)
+	for _, c := range t.Root.Children {
+		flattenInto(c, 0, &flat)
+	}
+	nodes := make([]*Node, 1, len(flat)+1)
+	nodes[0] = t.Root
+	for _, item := range flat {
+		nodes = append(nodes, item.Node)
+	}
+	return nodes
+}
+
+func nodeByPath(n *Node, path string) *Node {
+	if n == nil {
+		return nil
+	}
+	if n.Path == path {
+		return n
+	}
+	for _, child := range n.Children {
+		if found := nodeByPath(child, path); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+func pathWithin(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // Reveal expands every directory from the tree root down to path's parent so
