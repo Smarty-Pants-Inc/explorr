@@ -177,28 +177,44 @@ func parseHerdRColor(value string) (tcell.Color, bool) {
 	if index, ok := strings.CutPrefix(value, "indexed:"); ok {
 		parsed, err := strconv.ParseUint(index, 10, 8)
 		if err == nil {
-			return tcell.ColorValid + tcell.Color(parsed), true
+			return tcell.PaletteColor(int(parsed)), true
 		}
 	}
 
-	named := map[string]tcell.Color{
-		"black":        tcell.ColorBlack,
-		"red":          tcell.ColorMaroon,
-		"green":        tcell.ColorGreen,
-		"yellow":       tcell.ColorOlive,
-		"blue":         tcell.ColorNavy,
-		"magenta":      tcell.ColorPurple,
-		"cyan":         tcell.ColorTeal,
-		"gray":         tcell.ColorSilver,
-		"darkgray":     tcell.ColorGray,
-		"lightred":     tcell.ColorRed,
-		"lightgreen":   tcell.ColorLime,
-		"lightyellow":  tcell.ColorYellow,
-		"lightblue":    tcell.ColorBlue,
-		"lightmagenta": tcell.ColorFuchsia,
-		"lightcyan":    tcell.ColorAqua,
-		"white":        tcell.ColorWhite,
+	switch value {
+	case "black":
+		return tcell.ColorBlack, true
+	case "red":
+		return tcell.ColorMaroon, true
+	case "green":
+		return tcell.ColorGreen, true
+	case "yellow":
+		return tcell.ColorOlive, true
+	case "blue":
+		return tcell.ColorNavy, true
+	case "magenta":
+		return tcell.ColorPurple, true
+	case "cyan":
+		return tcell.ColorTeal, true
+	case "gray":
+		return tcell.ColorSilver, true
+	case "darkgray":
+		return tcell.ColorGray, true
+	case "lightred":
+		return tcell.ColorRed, true
+	case "lightgreen":
+		return tcell.ColorLime, true
+	case "lightyellow":
+		return tcell.ColorYellow, true
+	case "lightblue":
+		return tcell.ColorBlue, true
+	case "lightmagenta":
+		return tcell.ColorFuchsia, true
+	case "lightcyan":
+		return tcell.ColorAqua, true
+	case "white":
+		return tcell.ColorWhite, true
+	default:
+		return tcell.ColorDefault, false
 	}
-	color, ok := named[value]
-	return color, ok
 }

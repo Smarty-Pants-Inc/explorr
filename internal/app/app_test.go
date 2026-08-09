@@ -2866,8 +2866,8 @@ func TestExplorerUsesWholePaneForTree(t *testing.T) {
 	a.tree.Focus(a.tree.Root.Path, a.treeListHeight())
 
 	x, y, w, h := a.sidebarRect()
-	if x != 0 || y != 0 || w != a.width || h != a.height {
-		t.Fatalf("explorer tree rect = (%d,%d,%d,%d), want whole pane", x, y, w, h)
+	if x != 0 || y != 0 || w != a.width || h != a.height-1 {
+		t.Fatalf("explorer tree rect = (%d,%d,%d,%d), want pane minus footer", x, y, w, h)
 	}
 	if got := a.splitterX(); got != -1 {
 		t.Fatalf("explorer drew an internal splitter at %d", got)
@@ -2894,10 +2894,29 @@ func TestExplorerUsesWholePaneForTree(t *testing.T) {
 	if strings.Contains(all[0], "explorer") || strings.Contains(all[0], "EXPLORER") {
 		t.Fatalf("tree rendered the host-owned explorer label: %q", all[0])
 	}
-	for _, editorChrome := range []string{"≡", "Welcome —", "NAVIGATE"} {
+	for _, editorChrome := range []string{"≡", "Welcome —"} {
 		if strings.Contains(rendered, editorChrome) {
 			t.Fatalf("explorer rendered editor chrome %q:\n%s", editorChrome, rendered)
 		}
+	}
+	if footer := strings.TrimSpace(all[a.height-1]); footer != "" {
+		t.Fatalf("explorer rendered a plugin-owned footer: %q", footer)
+	}
+}
+
+func TestExplorerFocusEventsControlTreeHighlight(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.explorer = true
+	a.tree.Focus(a.tree.Root.Path, a.treeListHeight())
+
+	a.handleEvent(tcell.NewEventFocus(false))
+	if a.tree.Focused {
+		t.Fatal("focus lost should blur explorer selection")
+	}
+
+	a.handleEvent(tcell.NewEventFocus(true))
+	if !a.tree.Focused {
+		t.Fatal("focus gained should restore explorer selection")
 	}
 }
 
