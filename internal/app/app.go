@@ -18,14 +18,14 @@
 package app
 
 import (
+	"encoding/json"
 	"fmt"
+	"github.com/gdamore/tcell/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/gdamore/tcell/v2"
 
 	"github.com/cloudmanic/spice-edit/internal/clipboard"
 	"github.com/cloudmanic/spice-edit/internal/customactions"
@@ -400,8 +400,9 @@ func (a *App) hasTree() bool {
 
 // App is the editor's top-level state holder and event-loop owner.
 type App struct {
-	screen tcell.Screen
-	theme  theme.Theme
+	screen   tcell.Screen
+	theme    theme.Theme
+	explorer bool
 
 	rootDir   string
 	tree      *filetree.Tree
@@ -689,9 +690,7 @@ type App struct {
 	quit bool
 }
 
-// New initialises the screen and mouse, builds the file tree at rootDir,
-// and returns an App ready to Run.
-func New(rootDir string) (*App, error) {
+func newScreen(th theme.Theme) (tcell.Screen, error) {
 	scr, err := tcell.NewScreen()
 	if err != nil {
 		return nil, err
@@ -700,10 +699,19 @@ func New(rootDir string) (*App, error) {
 		return nil, err
 	}
 	scr.EnableMouse(tcell.MouseButtonEvents | tcell.MouseDragEvents | tcell.MouseMotionEvents)
-
-	th := theme.Default()
 	scr.SetStyle(tcell.StyleDefault.Background(th.BG).Foreground(th.Text))
 	scr.Clear()
+	return scr, nil
+}
+
+// New initialises the screen and mouse, builds the file tree at rootDir,
+// and returns an App ready to Run.
+func New(rootDir string) (*App, error) {
+	th := theme.Default()
+	scr, err := newScreen(th)
+	if err != nil {
+		return nil, err
+	}
 
 	tree, err := filetree.New(rootDir)
 	if err != nil {
@@ -749,6 +757,43 @@ func New(rootDir string) (*App, error) {
 	return a, nil
 }
 
+// NewExplorer builds the workspace-right HerdR file tree. It deliberately
+// omits editor tabs, LSPs, publishers, and the project finder: activating a
+// file opens a separate single-file editor in a regular HerdR tab.
+func NewExplorer(rootDir string) (*App, error) {
+	th := theme.FromHerdR(theme.Default())
+	scr, err := newScreen(th)
+	if err != nil {
+		return nil, err
+	}
+	scr.SetStyle(tcell.StyleDefault.Background(th.SidebarBG).Foreground(th.Text))
+	scr.Clear()
+
+	tree, err := filetree.New(rootDir)
+	if err != nil {
+		scr.Fini()
+		return nil, err
+	}
+	tree.ExternalHeader = true
+
+	a := &App{
+		screen:         scr,
+		theme:          th,
+		explorer:       true,
+		rootDir:        tree.Root.Path,
+		tree:           tree,
+		hoveredMenuRow: -1,
+		sidebarShown:   true,
+		sidebarWidth:   defaultSidebarWidth,
+	}
+	a.setActiveFolder(tree.Root.Path)
+	a.loadSpiceConfig()
+	a.refreshGitStatus()
+	a.tree.Focus(tree.Root.Path, 0)
+	a.startTreeRefresh()
+	return a, nil
+}
+
 // NewSingleFile is the lean alternative to New for the "spiceedit
 // somefile.md" invocation: no file tree, no project finder index,
 // no background tree-refresh goroutine, sidebar hidden. The user
@@ -762,18 +807,11 @@ func New(rootDir string) (*App, error) {
 // actions that need a base directory — Save As, New File, the
 // relative/absolute path helpers — have somewhere to anchor.
 func NewSingleFile(filePath string) (*App, error) {
-	scr, err := tcell.NewScreen()
+	th := theme.Default()
+	scr, err := newScreen(th)
 	if err != nil {
 		return nil, err
 	}
-	if err := scr.Init(); err != nil {
-		return nil, err
-	}
-	scr.EnableMouse(tcell.MouseButtonEvents | tcell.MouseDragEvents | tcell.MouseMotionEvents)
-
-	th := theme.Default()
-	scr.SetStyle(tcell.StyleDefault.Background(th.BG).Foreground(th.Text))
-	scr.Clear()
 
 	rootDir := filepath.Dir(filePath)
 	if rootDir == "" {
@@ -962,9 +1000,13 @@ func (a *App) Close() {
 // each event, redraws, and exits when a.quit is set.
 func (a *App) Run() error {
 	a.width, a.height = a.screen.Size()
-	a.startLSP()
-	if tab := a.activeTabPtr(); tab != nil {
-		a.lspDidOpen(tab.Path, tab.Buffer.String())
+	if !a.explorer {
+		a.startLSP()
+		if tab := a.activeTabPtr(); tab != nil {
+			a.lspDidOpen(tab.Path, tab.Buffer.String())
+		}
+	} else {
+		a.tree.Focus(a.tree.SelectedPath, a.treeListHeight())
 	}
 	a.draw()
 	a.screen.Show()
@@ -976,16 +1018,21 @@ func (a *App) Run() error {
 		}
 		a.handleEvent(ev)
 		a.draw()
-		// syncBreakpoints runs BEFORE publishDebug: the panel's breakpoint list
-		// comes out of a.breakpoints, and publishing first would mirror a set
-		// that is one event behind the marks the user can see in the gutter.
-		a.syncBreakpoints()
-		a.publishActive()
-		a.publishDebug()
-		a.consumeOpenRequest()
-		a.consumeDebugRequest()
-		a.maybeSyncLSP()
+		if !a.explorer {
+			// syncBreakpoints runs BEFORE publishDebug: the panel's breakpoint list
+			// comes out of a.breakpoints, and publishing first would mirror a set
+			// that is one event behind the marks the user can see in the gutter.
+			a.syncBreakpoints()
+			a.publishActive()
+			a.publishDebug()
+			a.consumeOpenRequest()
+			a.consumeDebugRequest()
+			a.maybeSyncLSP()
+		}
 		a.screen.Show()
+	}
+	if a.explorer {
+		return nil
 	}
 	a.active.Flush() // do not lose the final position inside the debounce window
 	// 🔴 The CLEAN-EXIT half of the staleness contract, and it belongs in this
@@ -1268,6 +1315,9 @@ func (a *App) sidebarW() int {
 	if !a.sidebarVisible() {
 		return 0
 	}
+	if a.explorer {
+		return a.width
+	}
 	w := a.sidebarWidth
 	if !a.sidebarUserSized {
 		w = a.autoSidebarWidth()
@@ -1333,6 +1383,9 @@ func (a *App) maxSidebarWidth() int {
 // The threshold is treeNeeds, not the tree's preferred width: between the two the tree narrows
 // (sidebarW) instead of disappearing.
 func (a *App) sidebarVisible() bool {
+	if a.explorer {
+		return a.tree != nil && a.width > 0 && a.height > 0
+	}
 	return a.sidebarShown && a.tree != nil && a.width >= treeNeeds
 }
 
@@ -1340,6 +1393,12 @@ func (a *App) sidebarVisible() bool {
 // narrower than the sidebar block — the rightmost column belongs to the
 // resize splitter). Zero width when the sidebar is hidden.
 func (a *App) sidebarRect() (x, y, w, h int) {
+	if a.explorer {
+		if !a.sidebarVisible() {
+			return 0, 0, 0, 0
+		}
+		return 0, 0, a.width, a.height
+	}
 	sw := a.sidebarW()
 	if sw <= 0 {
 		return 0, 0, 0, 0
@@ -1354,6 +1413,9 @@ func (a *App) sidebarRect() (x, y, w, h int) {
 // stored preference, and reading the preference here would draw the splitter — and hit-test drags
 // and hovers — one to twelve columns away from the divider the user can actually see.
 func (a *App) splitterX() int {
+	if a.explorer {
+		return -1
+	}
 	sw := a.sidebarW()
 	if sw <= 0 {
 		return -1
@@ -1765,7 +1827,9 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		if a.tryTreeContextClick(x, y) {
 			return
 		}
-		a.openMenu()
+		if !a.explorer {
+			a.openMenu()
+		}
 		return
 	}
 
@@ -1828,6 +1892,8 @@ func (a *App) handleMouse(ev *tcell.EventMouse) {
 		sw := a.sidebarW()
 		splitX := a.splitterX()
 		switch {
+		case a.explorer && sw > 0:
+			a.sidebarClick(x, y)
 		case splitX >= 0 && x == splitX:
 			// Double-clicking the sash returns the sidebar to auto-fit, which is what VS Code does
 			// with a double-clicked sash. Without this, dragging it once pinned the width for the
@@ -1923,15 +1989,13 @@ func (a *App) scrollAtH(x, y, delta int) {
 // menu's New File defaults to a sensible target even after the context
 // menu closes.
 func (a *App) tryTreeContextClick(x, y int) bool {
-	sw := a.sidebarW()
-	if sw <= 0 {
+	sx, sy, sw, sh := a.sidebarRect()
+	if sw <= 0 || x < sx || x >= sx+sw || y < sy || y >= sy+sh {
 		return false
 	}
-	splitX := a.splitterX()
-	if x >= splitX {
+	if !a.explorer && x >= a.splitterX() {
 		return false
 	}
-	sx, sy, _, _ := a.sidebarRect()
 	n, ok := a.tree.HitTest(x-sx, y-sy)
 	if !ok {
 		return false
@@ -1972,7 +2036,95 @@ func (a *App) sidebarClick(x, y int) {
 		return
 	}
 	a.setActiveFolder(filepath.Dir(n.Path))
-	a.openFile(n.Path)
+	a.openTreeFile(n.Path)
+}
+
+func (a *App) openTreeFile(path string) {
+	if !a.explorer {
+		a.openFile(path)
+		return
+	}
+	a.tree.ActiveFile = path
+	if err := openFileInHerdRTab(path); err != nil {
+		a.openInfo("Could not open file", []string{err.Error()})
+	}
+}
+
+type herdrTabCreateResponse struct {
+	Result struct {
+		Tab struct {
+			TabID string `json:"tab_id"`
+		} `json:"tab"`
+		RootPane struct {
+			PaneID string `json:"pane_id"`
+		} `json:"root_pane"`
+	} `json:"result"`
+}
+
+func openFileInHerdRTab(path string) error {
+	workspaceID := strings.TrimSpace(os.Getenv("HERDR_WORKSPACE_ID"))
+	if workspaceID == "" {
+		return fmt.Errorf("HERDR_WORKSPACE_ID is not set")
+	}
+	herdrBin := strings.TrimSpace(os.Getenv("HERDR_BIN_PATH"))
+	if herdrBin == "" {
+		herdrBin = "herdr"
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+
+	output, err := runHerdR(herdrBin, "tab", "create",
+		"--workspace", workspaceID,
+		"--cwd", filepath.Dir(abs),
+		"--label", filepath.Base(abs),
+		"--no-focus")
+	if err != nil {
+		return err
+	}
+	var created herdrTabCreateResponse
+	if err := json.Unmarshal(output, &created); err != nil {
+		return fmt.Errorf("parse herdr tab create response: %w", err)
+	}
+	tabID := created.Result.Tab.TabID
+	paneID := created.Result.RootPane.PaneID
+	if tabID == "" || paneID == "" {
+		return fmt.Errorf("herdr tab create response omitted tab or pane id")
+	}
+	cleanup := func() { _, _ = runHerdR(herdrBin, "tab", "close", tabID) }
+
+	executable, err := os.Executable()
+	if err != nil {
+		cleanup()
+		return err
+	}
+	command := "exec " + shellQuote(executable) + " " + shellQuote(abs)
+	if _, err := runHerdR(herdrBin, "pane", "run", paneID, command); err != nil {
+		cleanup()
+		return err
+	}
+	if _, err := runHerdR(herdrBin, "tab", "focus", tabID); err != nil {
+		cleanup()
+		return err
+	}
+	return nil
+}
+
+func runHerdR(bin string, args ...string) ([]byte, error) {
+	output, err := exec.Command(bin, args...).CombinedOutput()
+	if err == nil {
+		return output, nil
+	}
+	action := strings.Join(args[:min(2, len(args))], " ")
+	if detail := strings.TrimSpace(string(output)); detail != "" {
+		return nil, fmt.Errorf("herdr %s: %s", action, detail)
+	}
+	return nil, fmt.Errorf("herdr %s: %w", action, err)
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 // setActiveFolder records path as the editor's current working folder and
@@ -2881,7 +3033,8 @@ func (a *App) menuFocusSidebar() {
 
 func (a *App) treeListHeight() int {
 	_, _, _, h := a.sidebarRect()
-	return max(0, h-2)
+	headerRows := 2
+	return max(0, h-headerRows)
 }
 
 // handleTreeKey implements the same compact navigation vocabulary HerdR uses:
@@ -2891,7 +3044,9 @@ func (a *App) handleTreeKey(ev *tcell.EventKey) {
 	r := ev.Rune()
 	switch {
 	case ev.Key() == tcell.KeyEsc || ev.Key() == tcell.KeyTab || ev.Key() == tcell.KeyBacktab:
-		a.tree.Blur()
+		if !a.explorer {
+			a.tree.Blur()
+		}
 	case ev.Key() == tcell.KeyUp || r == 'k':
 		a.tree.MoveSelection(-1, viewH)
 	case ev.Key() == tcell.KeyDown || r == 'j':
@@ -2944,8 +3099,10 @@ func (a *App) activateTreeSelection(viewH int) {
 		return
 	}
 	a.setActiveFolder(filepath.Dir(n.Path))
-	a.openFile(n.Path)
-	a.tree.Blur()
+	a.openTreeFile(n.Path)
+	if !a.explorer {
+		a.tree.Blur()
+	}
 }
 
 // menuToggleSidebar shows or hides the file explorer panel. Esc-T keeps this
@@ -3032,6 +3189,23 @@ func (a *App) menuQuit() {
 // The action modal — if open — is drawn last so it sits on top of everything.
 func (a *App) draw() {
 	a.screen.Clear()
+
+	if a.explorer {
+		if a.sidebarVisible() {
+			sx, sy, sw, sh := a.sidebarRect()
+			a.tree.Render(a.screen, a.theme, sx, sy, sw, sh)
+		}
+		if a.contextOpen {
+			a.drawContext()
+		}
+		if a.promptOpen {
+			a.drawPrompt()
+		}
+		if a.confirmOpen {
+			a.drawConfirm()
+		}
+		return
+	}
 
 	if a.width < minWidth || a.height < minHeight {
 		a.drawTooSmall()

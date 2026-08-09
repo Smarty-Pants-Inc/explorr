@@ -16,13 +16,13 @@ package app
 
 import (
 	"fmt"
+	"github.com/gdamore/tcell/v2"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/gdamore/tcell/v2"
 
 	"github.com/cloudmanic/spice-edit/internal/customactions"
 	"github.com/cloudmanic/spice-edit/internal/editor"
@@ -2854,5 +2854,98 @@ func TestTreeNavigationStatusUsesNativeModeCue(t *testing.T) {
 	fg, _, _ := cells[x].Style.Decompose()
 	if fg != a.theme.Accent {
 		t.Fatalf("focused splitter fg = %v, want accent %v (screen width %d)", fg, a.theme.Accent, w)
+	}
+}
+
+func TestExplorerUsesWholePaneForTree(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	a.explorer = true
+	a.width, a.height = 32, 8
+	a.tree.ExternalHeader = true
+	a.screen.SetSize(a.width, a.height)
+	a.tree.Focus(a.tree.Root.Path, a.treeListHeight())
+
+	x, y, w, h := a.sidebarRect()
+	if x != 0 || y != 0 || w != a.width || h != a.height {
+		t.Fatalf("explorer tree rect = (%d,%d,%d,%d), want whole pane", x, y, w, h)
+	}
+	if got := a.splitterX(); got != -1 {
+		t.Fatalf("explorer drew an internal splitter at %d", got)
+	}
+
+	a.draw()
+	a.screen.Show()
+	scr := a.screen.(tcell.SimulationScreen)
+	all := make([]string, a.height)
+	for row := range all {
+		all[row] = screenLine(scr, row)
+		last, _, _, _ := scr.GetContent(a.width-1, row)
+		if last == '│' {
+			t.Fatalf("row %d has an internal tree border", row)
+		}
+	}
+	rendered := strings.Join(all, "\n")
+	if strings.TrimSpace(all[0]) != "" {
+		t.Fatalf("explorer spacer row is not blank: %q", all[0])
+	}
+	if !strings.Contains(all[1], a.tree.Root.Name) {
+		t.Fatalf("project root missing below header spacer: %q", all[1])
+	}
+	if strings.Contains(all[0], "explorer") || strings.Contains(all[0], "EXPLORER") {
+		t.Fatalf("tree rendered the host-owned explorer label: %q", all[0])
+	}
+	for _, editorChrome := range []string{"≡", "Welcome —", "NAVIGATE"} {
+		if strings.Contains(rendered, editorChrome) {
+			t.Fatalf("explorer rendered editor chrome %q:\n%s", editorChrome, rendered)
+		}
+	}
+}
+
+func TestOpenFileInHerdRTabCreatesRunsThenFocuses(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses a POSIX fake herdr executable")
+	}
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "calls.log")
+	fakeHerdr := filepath.Join(dir, "herdr")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$HERDR_TEST_LOG"
+case "$1:$2" in
+  tab:create) printf '%s\n' '{"result":{"tab":{"tab_id":"wA:2"},"root_pane":{"pane_id":"wA:2:p1"}}}' ;;
+  *) printf '%s\n' '{"result":{}}' ;;
+esac
+`
+	if err := os.WriteFile(fakeHerdr, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_TEST_LOG", logPath)
+	t.Setenv("HERDR_WORKSPACE_ID", "wA")
+	t.Setenv("HERDR_BIN_PATH", fakeHerdr)
+
+	file := filepath.Join(dir, "odd file's.go")
+	if err := openFileInHerdRTab(file); err != nil {
+		t.Fatal(err)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := strings.Split(strings.TrimSpace(string(logBytes)), "\n")
+	if len(calls) != 3 {
+		t.Fatalf("calls = %q, want create/run/focus", calls)
+	}
+	if want := "tab create --workspace wA --cwd " + dir + " --label odd file's.go --no-focus"; calls[0] != want {
+		t.Fatalf("create call = %q, want %q", calls[0], want)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRun := "pane run wA:2:p1 exec " + shellQuote(executable) + " " + shellQuote(file)
+	if calls[1] != wantRun {
+		t.Fatalf("run call = %q, want %q", calls[1], wantRun)
+	}
+	if calls[2] != "tab focus wA:2" {
+		t.Fatalf("focus call = %q", calls[2])
 	}
 }

@@ -149,6 +149,30 @@ func TestResolveArgs_OpenAt(t *testing.T) {
 	}
 }
 
+func TestResolveArgs_ExplorerMode(t *testing.T) {
+	dir := t.TempDir()
+	got := resolveArgs([]string{"--explorer", dir})
+	if got.Err != nil || got.Action != actionExplorer || got.RootDir != dir || got.OpenFile != "" {
+		t.Fatalf("explicit explorer directory resolved to %+v", got)
+	}
+
+	got = resolveArgs([]string{"--explorer"})
+	if got.Err != nil || got.Action != actionExplorer || got.RootDir != "." {
+		t.Fatalf("default explorer directory resolved to %+v", got)
+	}
+
+	file := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(file, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolveArgs([]string{"--explorer", file}); got.Err == nil {
+		t.Fatal("explorer accepted a file root")
+	}
+	if got := resolveArgs([]string{"--explorer", dir, "extra"}); got.Err == nil {
+		t.Fatal("explorer accepted more than one directory")
+	}
+}
+
 // TestResolveArgs_Debug pins the flag the Debug panel drives the editor with.
 //
 // Every key in that panel becomes one of these invocations, so the parse has to

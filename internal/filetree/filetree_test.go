@@ -374,6 +374,21 @@ func TestHitTest_ProjectRootRowReturnsRoot(t *testing.T) {
 	}
 }
 
+func TestHitTest_ExternalHeaderLeavesSpacer(t *testing.T) {
+	root := &Node{Name: "proj", IsDir: true, Path: "/proj"}
+	target := &Node{Name: "a", Path: "/proj/a"}
+	tr := &Tree{Root: root, visible: []*Node{target}, ExternalHeader: true}
+	if n, ok := tr.HitTest(0, 0); ok || n != nil {
+		t.Fatalf("spacer row should miss, got ok=%v node=%v", ok, n)
+	}
+	if n, ok := tr.HitTest(0, 1); !ok || n != root {
+		t.Fatalf("y=1 should map to workspace root, got ok=%v node=%v", ok, n)
+	}
+	if n, ok := tr.HitTest(0, 2); !ok || n != target {
+		t.Fatalf("y=2 should map to first child, got ok=%v node=%v", ok, n)
+	}
+}
+
 // TestHitTest_ValidRow checks the happy path: a click on a real row maps
 // back to the same Node we recorded during the last Render.
 func TestHitTest_ValidRow(t *testing.T) {
@@ -1264,6 +1279,13 @@ func TestNaturalWidthEmptyAndNil(t *testing.T) {
 	// An empty project still has to leave room for the two header rows.
 	if got := tr.NaturalWidth(); got < len([]rune(" EXPLORER")) {
 		t.Fatalf("empty project: got %d, want at least the header width", got)
+	}
+}
+
+func TestNaturalWidthExternalHeaderUsesProjectName(t *testing.T) {
+	tr := &Tree{Root: &Node{Name: "x"}, ExternalHeader: true}
+	if got := tr.NaturalWidth(); got != len([]rune(" x")) {
+		t.Fatalf("external header width = %d, want project name width", got)
 	}
 }
 

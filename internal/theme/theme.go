@@ -12,7 +12,13 @@
 // the syntax colors stay legible against the chrome.
 package theme
 
-import "github.com/gdamore/tcell/v2"
+import (
+	"os"
+	"strconv"
+	"strings"
+
+	"github.com/gdamore/tcell/v2"
+)
 
 // Theme bundles every color the editor renders. UI surfaces, accents, and
 // syntax-highlight colors all live in one struct so that adjusting one
@@ -76,63 +82,123 @@ type Theme struct {
 	SynConstant tcell.Color
 }
 
-// Default returns the editor's curated dark theme. It is the only theme the
-// editor ships with — calling code can tweak fields on the returned value if
-// it really needs to, but there is no theme-loading machinery on purpose.
+// Default mirrors OMP's titanium-paul palette. herdr-edit intentionally keeps
+// its single compile-time theme in the fork rather than loading runtime files.
 func Default() Theme {
 	return Theme{
-		// Surfaces.
-		BG:        tcell.NewRGBColor(0x1a, 0x1b, 0x26),
-		SidebarBG: tcell.NewRGBColor(0x16, 0x16, 0x1e),
-		StatusBG:  tcell.NewRGBColor(0x7a, 0xa2, 0xf7),
-		LineHL:    tcell.NewRGBColor(0x1f, 0x20, 0x2e),
+		BG:        tcell.NewRGBColor(0x15, 0x18, 0x20),
+		SidebarBG: tcell.NewRGBColor(0x0f, 0x12, 0x16),
+		StatusBG:  tcell.NewRGBColor(0x0f, 0x12, 0x16),
+		LineHL:    tcell.NewRGBColor(0x1f, 0x25, 0x2d),
 
-		// Foregrounds & accents.
-		Text:        tcell.NewRGBColor(0xc0, 0xca, 0xf5),
-		Muted:       tcell.NewRGBColor(0x56, 0x5f, 0x89),
-		Subtle:      tcell.NewRGBColor(0x32, 0x34, 0x4a),
-		Accent:      tcell.NewRGBColor(0x7a, 0xa2, 0xf7),
-		AccentSoft:  tcell.NewRGBColor(0xbb, 0x9a, 0xf7),
-		Selection:   tcell.NewRGBColor(0x33, 0x46, 0x7c),
-		Modified:    tcell.NewRGBColor(0xe0, 0xaf, 0x68),
-		Error:       tcell.NewRGBColor(0xf7, 0x76, 0x8e),
-		GitModified: tcell.NewRGBColor(0xff, 0x9e, 0x64),
-		GitAdded:    tcell.NewRGBColor(0x9e, 0xce, 0x6a),
-		GitDeleted:  tcell.NewRGBColor(0xf7, 0x76, 0x8e),
-		GitRenamed:  tcell.NewRGBColor(0x7d, 0xcf, 0xf7),
-		GitMixed:    tcell.NewRGBColor(0xbb, 0x9a, 0xf7),
+		Text:        tcell.NewRGBColor(0xe8, 0xec, 0xf4),
+		Muted:       tcell.NewRGBColor(0x9c, 0xa3, 0xb0),
+		Subtle:      tcell.NewRGBColor(0x2a, 0x30, 0x38),
+		Accent:      tcell.NewRGBColor(0x00, 0xb4, 0xff),
+		AccentSoft:  tcell.NewRGBColor(0xd4, 0xc0, 0x90),
+		Selection:   tcell.NewRGBColor(0x00, 0x82, 0xb3),
+		Modified:    tcell.NewRGBColor(0xff, 0xb3, 0x47),
+		Error:       tcell.NewRGBColor(0xff, 0x47, 0x57),
+		GitModified: tcell.NewRGBColor(0xff, 0xb3, 0x47),
+		GitAdded:    tcell.NewRGBColor(0x00, 0xff, 0x88),
+		GitDeleted:  tcell.NewRGBColor(0xff, 0x47, 0x57),
+		GitRenamed:  tcell.NewRGBColor(0x00, 0xb4, 0xff),
+		GitMixed:    tcell.NewRGBColor(0xd4, 0xc0, 0x90),
 
-		// Find. FindMatch is a desaturated amber so it reads as "all
-		// hits" without competing with the syntax palette. FindCurrent
-		// is full amber — the same shade the dirty indicator uses —
-		// so the active match jumps off the page.
-		FindMatch:   tcell.NewRGBColor(0x6f, 0x52, 0x1f),
-		FindCurrent: tcell.NewRGBColor(0xe0, 0xaf, 0x68),
+		FindMatch:   tcell.NewRGBColor(0x3e, 0x44, 0x51),
+		FindCurrent: tcell.NewRGBColor(0x00, 0x82, 0xb3),
 
-		// Conflict tints. Green for ours / blue for theirs is the convention
-		// every merge tool since diff3 has used and the one people arrive
-		// with; the ancestor section is a neutral slate so it reads as
-		// context rather than as a third candidate. All three are darker
-		// than Selection so a selection inside a conflict still stands out.
-		ConflictOurs:   tcell.NewRGBColor(0x24, 0x3a, 0x28),
-		ConflictBase:   tcell.NewRGBColor(0x2b, 0x2c, 0x3a),
-		ConflictTheirs: tcell.NewRGBColor(0x25, 0x33, 0x4f),
+		ConflictOurs:   tcell.NewRGBColor(0x0f, 0x2b, 0x22),
+		ConflictBase:   tcell.NewRGBColor(0x2b, 0x31, 0x3b),
+		ConflictTheirs: tcell.NewRGBColor(0x10, 0x27, 0x36),
 
-		// Tree.
-		FolderColor: tcell.NewRGBColor(0x7a, 0xa2, 0xf7),
-		FileColor:   tcell.NewRGBColor(0xa9, 0xb1, 0xd6),
+		FolderColor: tcell.NewRGBColor(0x00, 0xb4, 0xff),
+		FileColor:   tcell.NewRGBColor(0xe8, 0xec, 0xf4),
 
-		// Syntax — Tokyo Night-ish.
-		SynKeyword:  tcell.NewRGBColor(0xbb, 0x9a, 0xf7), // purple
-		SynString:   tcell.NewRGBColor(0x9e, 0xce, 0x6a), // green
-		SynNumber:   tcell.NewRGBColor(0xff, 0x9e, 0x64), // orange
-		SynComment:  tcell.NewRGBColor(0x56, 0x5f, 0x89), // muted slate
-		SynFunction: tcell.NewRGBColor(0x7a, 0xa2, 0xf7), // blue
-		SynType:     tcell.NewRGBColor(0x2a, 0xc3, 0xde), // cyan
-		SynBuiltin:  tcell.NewRGBColor(0xf7, 0x76, 0x8e), // red
-		SynVariable: tcell.NewRGBColor(0xc0, 0xca, 0xf5), // text-like
-		SynOperator: tcell.NewRGBColor(0x89, 0xdd, 0xff), // light cyan
-		SynPunct:    tcell.NewRGBColor(0xa9, 0xb1, 0xd6), // soft text
-		SynConstant: tcell.NewRGBColor(0xff, 0x9e, 0x64), // orange
+		SynKeyword:  tcell.NewRGBColor(0x00, 0xb4, 0xff),
+		SynString:   tcell.NewRGBColor(0xd4, 0xc0, 0x90),
+		SynNumber:   tcell.NewRGBColor(0xff, 0xb3, 0x47),
+		SynComment:  tcell.NewRGBColor(0x6b, 0x72, 0x80),
+		SynFunction: tcell.NewRGBColor(0x00, 0xff, 0x88),
+		SynType:     tcell.NewRGBColor(0x00, 0xb4, 0xff),
+		SynBuiltin:  tcell.NewRGBColor(0xff, 0x47, 0x57),
+		SynVariable: tcell.NewRGBColor(0xe8, 0xec, 0xf4),
+		SynOperator: tcell.NewRGBColor(0x00, 0xb4, 0xff),
+		SynPunct:    tcell.NewRGBColor(0x9c, 0xa3, 0xb0),
+		SynConstant: tcell.NewRGBColor(0xff, 0xb3, 0x47),
 	}
+}
+
+// FromHerdR overlays the active HerdR palette exported to workspace plugin
+// panes. Unknown or missing values keep the editor's built-in palette.
+func FromHerdR(base Theme) Theme {
+	apply := func(target *tcell.Color, key string) {
+		if value, ok := os.LookupEnv(key); ok {
+			if color, valid := parseHerdRColor(value); valid {
+				*target = color
+			}
+		}
+	}
+
+	apply(&base.BG, "HERDR_THEME_PANEL_BG")
+	apply(&base.SidebarBG, "HERDR_THEME_SIDEBAR_BG")
+	apply(&base.StatusBG, "HERDR_THEME_SIDEBAR_BG")
+	apply(&base.LineHL, "HERDR_THEME_SURFACE0")
+	apply(&base.Text, "HERDR_THEME_TEXT")
+	apply(&base.Muted, "HERDR_THEME_OVERLAY0")
+	apply(&base.Subtle, "HERDR_THEME_SURFACE_DIM")
+	apply(&base.Accent, "HERDR_THEME_ACCENT")
+	apply(&base.AccentSoft, "HERDR_THEME_OVERLAY1")
+	apply(&base.Selection, "HERDR_THEME_SURFACE1")
+	apply(&base.Modified, "HERDR_THEME_YELLOW")
+	apply(&base.Error, "HERDR_THEME_RED")
+	apply(&base.GitModified, "HERDR_THEME_YELLOW")
+	apply(&base.GitAdded, "HERDR_THEME_GREEN")
+	apply(&base.GitDeleted, "HERDR_THEME_RED")
+	apply(&base.GitRenamed, "HERDR_THEME_BLUE")
+	apply(&base.GitMixed, "HERDR_THEME_MAUVE")
+	apply(&base.FolderColor, "HERDR_THEME_ACCENT")
+	apply(&base.FileColor, "HERDR_THEME_TEXT")
+	return base
+}
+
+// parseHerdRColor decodes the stable palette strings exported by HerdR.
+func parseHerdRColor(value string) (tcell.Color, bool) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "reset" {
+		return tcell.ColorDefault, true
+	}
+	if hex := strings.TrimPrefix(value, "#"); len(hex) == 6 && len(value) == 7 {
+		rgb, err := strconv.ParseUint(hex, 16, 24)
+		if err == nil {
+			return tcell.NewRGBColor(int32(rgb>>16), int32(rgb>>8&0xff), int32(rgb&0xff)), true
+		}
+	}
+	if index, ok := strings.CutPrefix(value, "indexed:"); ok {
+		parsed, err := strconv.ParseUint(index, 10, 8)
+		if err == nil {
+			return tcell.ColorValid + tcell.Color(parsed), true
+		}
+	}
+
+	named := map[string]tcell.Color{
+		"black":        tcell.ColorBlack,
+		"red":          tcell.ColorMaroon,
+		"green":        tcell.ColorGreen,
+		"yellow":       tcell.ColorOlive,
+		"blue":         tcell.ColorNavy,
+		"magenta":      tcell.ColorPurple,
+		"cyan":         tcell.ColorTeal,
+		"gray":         tcell.ColorSilver,
+		"darkgray":     tcell.ColorGray,
+		"lightred":     tcell.ColorRed,
+		"lightgreen":   tcell.ColorLime,
+		"lightyellow":  tcell.ColorYellow,
+		"lightblue":    tcell.ColorBlue,
+		"lightmagenta": tcell.ColorFuchsia,
+		"lightcyan":    tcell.ColorAqua,
+		"white":        tcell.ColorWhite,
+	}
+	color, ok := named[value]
+	return color, ok
 }

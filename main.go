@@ -31,11 +31,12 @@ import (
 type cliAction string
 
 const (
-	actionEdit    cliAction = "edit"
-	actionVersion cliAction = "version"
-	actionHelp    cliAction = "help"
-	actionOpenAt  cliAction = "open-at"
-	actionDebug   cliAction = "debug"
+	actionEdit     cliAction = "edit"
+	actionExplorer cliAction = "explorer"
+	actionVersion  cliAction = "version"
+	actionHelp     cliAction = "help"
+	actionOpenAt   cliAction = "open-at"
+	actionDebug    cliAction = "debug"
 )
 
 // cliResult bundles everything resolveArgs hands back: which top-level
@@ -73,6 +74,22 @@ func resolveArgs(args []string) cliResult {
 		return cliResult{Action: actionVersion}
 	case "--help", "-h", "help":
 		return cliResult{Action: actionHelp}
+	case "--explorer":
+		if len(args) > 2 {
+			return cliResult{Err: errors.New("--explorer accepts at most one directory")}
+		}
+		root := "."
+		if len(args) == 2 {
+			root = args[1]
+		}
+		info, err := os.Stat(root)
+		if err != nil {
+			return cliResult{Err: err}
+		}
+		if !info.IsDir() {
+			return cliResult{Err: fmt.Errorf("--explorer needs a directory, got %q", root)}
+		}
+		return cliResult{Action: actionExplorer, RootDir: root}
 	case "--open-at":
 		// Ask an ALREADY-RUNNING editor to jump to a location, rather than
 		// starting a second one. This is the reverse of the active-file
@@ -146,6 +163,7 @@ Usage:
   spiceedit                     Open the current directory.
   spiceedit <directory>         Open a project directory.
   spiceedit <file>              Open a file (its parent becomes the project root).
+  spiceedit --explorer [directory]  Open HerdR's file-tree-only workspace sidebar.
   spiceedit --open-at F:L[:C]   Ask a RUNNING editor to jump to that location.
   spiceedit --debug ACTION      Drive a RUNNING editor's debugger. ACTION is one of
                                 start, continue, next, stepIn, stepOut, pause, stop,
@@ -211,19 +229,19 @@ func main() {
 		return
 	}
 
-	// Single-file mode: when the user invoked `spiceedit somefile.md`,
-	// skip building the file tree and project file index entirely.
-	// They asked for one file — don't pay the CPU to walk the
-	// surrounding directory just so we can render a sidebar they
-	// didn't ask for. The action-menu sidebar toggle is filtered out
-	// in this mode too; see (*App).hasTree.
+	// Explorer mode is the workspace-right HerdR integration: one file tree,
+	// no internal editor chrome. File activation creates a regular HerdR tab
+	// running single-file mode instead.
 	var (
 		a   *app.App
 		err error
 	)
-	if res.OpenFile != "" {
+	switch {
+	case res.Action == actionExplorer:
+		a, err = app.NewExplorer(res.RootDir)
+	case res.OpenFile != "":
 		a, err = app.NewSingleFile(res.OpenFile)
-	} else {
+	default:
 		a, err = app.New(res.RootDir)
 	}
 	if err != nil {

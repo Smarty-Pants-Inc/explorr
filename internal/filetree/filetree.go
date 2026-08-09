@@ -101,6 +101,10 @@ type Tree struct {
 	// only the existing chevron (the legacy look) — important for
 	// terminals or fonts that can't render the private-use glyphs.
 	IconsEnabled bool
+
+	// ExternalHeader suppresses the tree-owned label while preserving its row
+	// as the spacer below HerdR's workspace-pane header.
+	ExternalHeader bool
 }
 
 // New creates a tree rooted at root and pre-loads its top-level children so
@@ -268,18 +272,16 @@ func (t *Tree) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 		}
 	}
 
-	// Header — small all-caps label above the project name. The
-	// project name itself is also a click target: it's the only way
-	// to reset the active folder back to the root once a subfolder
-	// has been selected. Render bold/Accent when it *is* the active
-	// folder, plain text otherwise — same visual rule the children
-	// rows follow, so the highlight is honest.
-	headerFG := th.Muted
-	if t.Focused {
-		headerFG = th.Accent
+	headerRows := 2
+	rootY := y + 1
+	if !t.ExternalHeader {
+		headerFG := th.Muted
+		if t.Focused {
+			headerFG = th.Accent
+		}
+		headerStyle := tcell.StyleDefault.Background(bg).Foreground(headerFG).Bold(true)
+		drawString(scr, x, y, w, " EXPLORER", headerStyle)
 	}
-	headerStyle := tcell.StyleDefault.Background(bg).Foreground(headerFG).Bold(true)
-	drawString(scr, x, y, w, " EXPLORER", headerStyle)
 	rootActive := t.ActiveFolder == "" || t.ActiveFolder == t.Root.Path
 	rootBG := bg
 	rootSelected := t.Focused && t.SelectedPath == t.Root.Path
@@ -287,7 +289,7 @@ func (t *Tree) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 		rootBG = th.LineHL
 		rootFill := tcell.StyleDefault.Background(rootBG)
 		for cx := x; cx < x+w; cx++ {
-			scr.SetContent(cx, y+1, ' ', nil, rootFill)
+			scr.SetContent(cx, rootY, ' ', nil, rootFill)
 		}
 	}
 	rootStyle := tcell.StyleDefault.Background(rootBG).Foreground(th.Text).Bold(true)
@@ -297,7 +299,7 @@ func (t *Tree) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 	if rootChange := t.DirtyFolders[t.Root.Path]; rootChange != GitChangeNone {
 		rootStyle = rootStyle.Foreground(gitChangeColor(th, rootChange))
 	}
-	drawString(scr, x, y+1, w, " "+t.Root.Name, rootStyle)
+	drawString(scr, x, rootY, w, " "+t.Root.Name, rootStyle)
 
 	// Build the flat list of visible rows from the root's children.
 	flat := make([]flatNode, 0, 128)
@@ -305,8 +307,8 @@ func (t *Tree) Render(scr tcell.Screen, th theme.Theme, x, y, w, h int) {
 		flattenInto(c, 0, &flat)
 	}
 
-	listTop := y + 2
-	listH := h - 2
+	listTop := y + headerRows
+	listH := h - headerRows
 	if listH < 0 {
 		listH = 0
 	}
@@ -398,11 +400,11 @@ func (t *Tree) FitWidth(percentile int) int {
 		return 0
 	}
 
-	// The two header rows: " EXPLORER" and the project name. Always a floor -- a truncated project
-	// name in the header is disorienting in a way a truncated row is not.
-	need := len([]rune(" EXPLORER"))
-	if n := len([]rune(" " + t.Root.Name)); n > need {
-		need = n
+	// The project name is always a sizing floor. Internal headers also need
+	// enough room for the full editor's label.
+	need := len([]rune(" " + t.Root.Name))
+	if !t.ExternalHeader && len([]rune(" EXPLORER")) > need {
+		need = len([]rune(" EXPLORER"))
 	}
 
 	flat := make([]flatNode, 0, 128)
@@ -558,24 +560,19 @@ func (t *Tree) clampScroll(total, viewH int) {
 	}
 }
 
-// HitTest maps a click within the tree's render rectangle to a Node.
-// Row 0 is the "EXPLORER" header (not clickable). Row 1 is the project
-// root name — clicking it returns t.Root so the caller can set the
-// active folder back to the project root, which is otherwise
-// unreachable once the user has selected any subfolder. Rows 2+ map
-// into the rendered children list.
-//
-// ok=false means the click landed on the EXPLORER header or empty
-// space below the last entry.
+// HitTest maps a click within the tree's render rectangle to a Node. Row 0 is
+// either the full editor's EXPLORER label or the workspace pane's spacer; the
+// project root starts on row 1 in both modes.
 func (t *Tree) HitTest(localX, localY int) (*Node, bool) {
 	_ = localX
-	if localY < 1 {
+	rootRow := 1
+	if localY < rootRow {
 		return nil, false
 	}
-	if localY == 1 {
+	if localY == rootRow {
 		return t.Root, true
 	}
-	row := localY - 2
+	row := localY - rootRow - 1
 	if row < 0 || row >= len(t.visible) {
 		return nil, false
 	}

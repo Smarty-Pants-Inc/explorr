@@ -95,11 +95,72 @@ func TestDefault_ContrastInvariants(t *testing.T) {
 		{"ConflictOurs vs ConflictTheirs", th.ConflictOurs, th.ConflictTheirs},
 		{"ConflictOurs vs ConflictBase", th.ConflictOurs, th.ConflictBase},
 		{"ConflictTheirs vs ConflictBase", th.ConflictTheirs, th.ConflictBase},
+		{"ConflictBase vs LineHL", th.ConflictBase, th.LineHL},
 	}
 
 	for _, c := range cases {
 		if c.a == c.b {
 			t.Errorf("Default(): %s collide (%v == %v)", c.name, c.a, c.b)
+		}
+	}
+}
+
+func TestDefault_TitaniumPalette(t *testing.T) {
+	th := Default()
+	cases := []struct {
+		name string
+		got  tcell.Color
+		want tcell.Color
+	}{
+		{"background", th.BG, tcell.NewRGBColor(0x15, 0x18, 0x20)},
+		{"text", th.Text, tcell.NewRGBColor(0xe8, 0xec, 0xf4)},
+		{"accent", th.Accent, tcell.NewRGBColor(0x00, 0xb4, 0xff)},
+		{"selection", th.Selection, tcell.NewRGBColor(0x00, 0x82, 0xb3)},
+	}
+	for _, tc := range cases {
+		if tc.got != tc.want {
+			t.Errorf("%s = %v, want %v", tc.name, tc.got, tc.want)
+		}
+	}
+}
+
+func TestFromHerdR_OverlaysExplorerPalette(t *testing.T) {
+	base := Default()
+	t.Setenv("HERDR_THEME_SIDEBAR_BG", "reset")
+	t.Setenv("HERDR_THEME_ACCENT", "#010203")
+	t.Setenv("HERDR_THEME_SURFACE0", "indexed:42")
+	t.Setenv("HERDR_THEME_RED", "lightred")
+	t.Setenv("HERDR_THEME_OVERLAY0", "not-a-color")
+
+	got := FromHerdR(base)
+	if got.SidebarBG != tcell.ColorDefault || got.StatusBG != tcell.ColorDefault {
+		t.Fatalf("sidebar backgrounds = %v/%v, want terminal default", got.SidebarBG, got.StatusBG)
+	}
+	if got.Accent != tcell.NewRGBColor(1, 2, 3) {
+		t.Fatalf("accent = %v, want #010203", got.Accent)
+	}
+	if got.LineHL != tcell.ColorValid+tcell.Color(42) {
+		t.Fatalf("selection surface = %v, want indexed color 42", got.LineHL)
+	}
+	if got.Error != tcell.ColorRed || got.GitDeleted != tcell.ColorRed {
+		t.Fatalf("red mapping = %v/%v, want bright ANSI red", got.Error, got.GitDeleted)
+	}
+	if got.Muted != base.Muted {
+		t.Fatalf("invalid override changed muted color from %v to %v", base.Muted, got.Muted)
+	}
+}
+
+func TestParseHerdRColor_UsesRatatuiANSIOrdering(t *testing.T) {
+	cases := map[string]tcell.Color{
+		"red":      tcell.ColorMaroon,
+		"gray":     tcell.ColorSilver,
+		"darkgray": tcell.ColorGray,
+		"lightred": tcell.ColorRed,
+	}
+	for input, want := range cases {
+		got, ok := parseHerdRColor(input)
+		if !ok || got != want {
+			t.Errorf("parseHerdRColor(%q) = %v, %v; want %v, true", input, got, ok, want)
 		}
 	}
 }
