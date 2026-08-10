@@ -303,7 +303,7 @@ func main() {
 		}
 		return
 	case actionHerdROpen:
-		if err := app.OpenFileInHerdRTab(res.OpenFile, res.OpenLine, res.OpenCol); err != nil {
+		if err := app.OpenFileFromHerdRLink(res.OpenFile, res.OpenLine, res.OpenCol); err != nil {
 			fmt.Fprintln(os.Stderr, "herdr-edit:", err)
 			os.Exit(1)
 		}

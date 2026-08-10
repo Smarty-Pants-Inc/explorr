@@ -72,6 +72,80 @@ type herdrTabCreateResponse struct {
 		} `json:"root_pane"`
 	} `json:"result"`
 }
+type herdrPaneSplitResponse struct {
+	Result struct {
+		Pane struct {
+			PaneID string `json:"pane_id"`
+		} `json:"pane"`
+	} `json:"result"`
+}
+
+// OpenFileFromHerdRLink opens Markdown in Reviewr and other files in a right split.
+func OpenFileFromHerdRLink(path string, line, col int) error {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".md", ".markdown":
+		helper := strings.TrimSpace(os.Getenv("HERDR_REVIEW_MARKDOWN_BIN"))
+		if helper == "" {
+			helper = "/Users/paulbettner/.local/bin/herdr-review-last-markdown"
+		}
+		output, err := exec.Command(helper, path).CombinedOutput()
+		if err == nil {
+			return nil
+		}
+		if detail := strings.TrimSpace(string(output)); detail != "" {
+			return fmt.Errorf("open Markdown in Reviewr: %s", detail)
+		}
+		return fmt.Errorf("open Markdown in Reviewr: %w", err)
+	default:
+		return OpenFileInHerdRSplit(path, line, col)
+	}
+}
+
+func OpenFileInHerdRSplit(path string, line, col int) error {
+	sourcePane := strings.TrimSpace(os.Getenv("HERDR_PANE_ID"))
+	if sourcePane == "" {
+		sourcePane = strings.TrimSpace(os.Getenv("HERDR_ACTIVE_PANE_ID"))
+	}
+	if sourcePane == "" {
+		return fmt.Errorf("HERDR_PANE_ID is not set")
+	}
+	herdrBin := strings.TrimSpace(os.Getenv("HERDR_BIN_PATH"))
+	if herdrBin == "" {
+		herdrBin = "herdr"
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+
+	output, err := runHerdR(herdrBin, "pane", "split", sourcePane,
+		"--direction", "right",
+		"--cwd", filepath.Dir(abs),
+		"--focus")
+	if err != nil {
+		return err
+	}
+	var created herdrPaneSplitResponse
+	if err := json.Unmarshal(output, &created); err != nil {
+		return fmt.Errorf("parse herdr pane split response: %w", err)
+	}
+	paneID := created.Result.Pane.PaneID
+	if paneID == "" {
+		return fmt.Errorf("herdr pane split response omitted pane id")
+	}
+	cleanup := func() { _, _ = runHerdR(herdrBin, "pane", "close", paneID) }
+
+	command, err := singleFileCommand(abs, line, col)
+	if err != nil {
+		cleanup()
+		return err
+	}
+	if _, err := runHerdR(herdrBin, "pane", "run", paneID, command); err != nil {
+		cleanup()
+		return err
+	}
+	return nil
+}
 
 func OpenFileInHerdRTab(path string, line, col int) error {
 	workspaceID := strings.TrimSpace(os.Getenv("HERDR_WORKSPACE_ID"))
@@ -106,12 +180,11 @@ func OpenFileInHerdRTab(path string, line, col int) error {
 	}
 	cleanup := func() { _, _ = runHerdR(herdrBin, "tab", "close", tabID) }
 
-	executable, err := os.Executable()
+	command, err := singleFileCommand(abs, line, col)
 	if err != nil {
 		cleanup()
 		return err
 	}
-	command := "exec " + shellQuote(executable) + " --single-file-at " + shellQuote(abs) + " " + fmt.Sprint(max(1, line)) + " " + fmt.Sprint(max(1, col))
 	if _, err := runHerdR(herdrBin, "pane", "run", paneID, command); err != nil {
 		cleanup()
 		return err
@@ -121,6 +194,13 @@ func OpenFileInHerdRTab(path string, line, col int) error {
 		return err
 	}
 	return nil
+}
+func singleFileCommand(path string, line, col int) (string, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	return "exec " + shellQuote(executable) + " --single-file-at " + shellQuote(path) + " " + fmt.Sprint(max(1, line)) + " " + fmt.Sprint(max(1, col)), nil
 }
 
 func runHerdR(bin string, args ...string) ([]byte, error) {

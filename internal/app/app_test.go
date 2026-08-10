@@ -3040,3 +3040,75 @@ esac
 		t.Fatalf("focus call = %q", calls[2])
 	}
 }
+
+func TestOpenFileInHerdRSplitCreatesFocusedSplitThenRuns(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses a POSIX fake herdr executable")
+	}
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "calls.log")
+	fakeHerdr := filepath.Join(dir, "herdr")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$HERDR_TEST_LOG"
+case "$1:$2" in
+  pane:split) printf '%s\n' '{"result":{"pane":{"pane_id":"wA:1:p2"}}}' ;;
+  *) printf '%s\n' '{"result":{}}' ;;
+esac
+`
+	if err := os.WriteFile(fakeHerdr, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_TEST_LOG", logPath)
+	t.Setenv("HERDR_PANE_ID", "wA:1:p1")
+	t.Setenv("HERDR_BIN_PATH", fakeHerdr)
+
+	file := filepath.Join(dir, "odd file's.go")
+	if err := OpenFileInHerdRSplit(file, 12, 4); err != nil {
+		t.Fatal(err)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := strings.Split(strings.TrimSpace(string(logBytes)), "\n")
+	if len(calls) != 2 {
+		t.Fatalf("calls = %q, want split/run", calls)
+	}
+	if want := "pane split wA:1:p1 --direction right --cwd " + dir + " --focus"; calls[0] != want {
+		t.Fatalf("split call = %q, want %q", calls[0], want)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRun := "pane run wA:1:p2 exec " + shellQuote(executable) + " --single-file-at " + shellQuote(file) + " 12 4"
+	if calls[1] != wantRun {
+		t.Fatalf("run call = %q, want %q", calls[1], wantRun)
+	}
+}
+
+func TestOpenFileFromHerdRLinkRoutesMarkdownToReviewr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses a POSIX helper")
+	}
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "reviewr.log")
+	helper := filepath.Join(dir, "review-markdown")
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\nprintf '%s\\n' \"$1\" > \"$HERDR_TEST_LOG\"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_TEST_LOG", logPath)
+	t.Setenv("HERDR_REVIEW_MARKDOWN_BIN", helper)
+
+	file := filepath.Join(dir, "notes.MARKDOWN")
+	if err := OpenFileFromHerdRLink(file, 12, 4); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(got)) != file {
+		t.Fatalf("reviewr helper received %q, want %q", strings.TrimSpace(string(got)), file)
+	}
+}
