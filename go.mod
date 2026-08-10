@@ -1,4 +1,4 @@
-module github.com/cloudmanic/spice-edit
+module github.com/Smarty-Pants-Inc/explorr
 
 go 1.24.0
 

@@ -23,7 +23,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/cloudmanic/spice-edit/internal/editor"
+	"github.com/Smarty-Pants-Inc/explorr/internal/editor"
 )
 
 // menuSelectAll selects the whole buffer. Bound to Esc a and to a menu row.

@@ -15,7 +15,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/cloudmanic/spice-edit/internal/filetree"
+	"github.com/Smarty-Pants-Inc/explorr/internal/filetree"
 )
 
 // screenAll returns the whole simulated screen as one string, so a test can assert on what the

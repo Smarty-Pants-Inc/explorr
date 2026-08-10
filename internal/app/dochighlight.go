@@ -22,7 +22,7 @@
 package app
 
 import (
-	"github.com/cloudmanic/spice-edit/internal/editor"
+	"github.com/Smarty-Pants-Inc/explorr/internal/editor"
 )
 
 // minHighlightSymbolRunes is the shortest identifier worth tinting. Below

@@ -22,7 +22,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/cloudmanic/spice-edit/internal/lsp"
+	"github.com/Smarty-Pants-Inc/explorr/internal/lsp"
 )
 
 // noSourceExit is the exit code gen/main.go uses for "no VS Code install to

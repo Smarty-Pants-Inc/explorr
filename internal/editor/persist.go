@@ -7,8 +7,8 @@
 
 // persist.go makes undo history survive closing and reopening a file. The
 // in-memory stacks in undo.go die with the process; this file mirrors them
-// to disk under $XDG_STATE_HOME/spiceedit/undo (falling back to
-// ~/.local/state/spiceedit/undo), one JSON file per absolute file path,
+// to disk under $XDG_STATE_HOME/explorr/undo (falling back to
+// ~/.local/state/explorr/undo), one JSON file per absolute file path,
 // keyed by a SHA-256 hash of the path so filenames are always safe and
 // collision-free.
 //
@@ -140,7 +140,7 @@ func persistUndoDir() (string, error) {
 		}
 		base = filepath.Join(home, ".local", "state")
 	}
-	return filepath.Join(base, "spiceedit", "undo"), nil
+	return filepath.Join(base, "explorr", "undo"), nil
 }
 
 // persistUndoKey derives the filename-safe key for absPath: a hex SHA-256

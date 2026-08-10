@@ -1,11 +1,11 @@
 ---
-name: herdr-edit-constructor-guards-untestable
-description: In herdr-edit, a safety guard that lives only in New()/NewSingleFile() can never be proven RED — put it where the comparison is.
+name: explorr-constructor-guards-untestable
+description: In Explorr, a safety guard that lives only in New()/NewSingleFile() cannot be proven RED; put it where the comparison is.
 metadata:
   type: project
 ---
 
-In herdr-edit, `internal/app/app_test.go`'s `newTestApp()` builds an `App` with a
+In Explorr, `internal/app/app_test.go`'s `newTestApp()` builds an `App` with a
 struct literal instead of calling `New()` / `NewSingleFile()`. So any guard
 implemented purely as constructor-set field state is **invisible to every test in
 the package** — the oracle for it passes against the bug, or fails against the fix,

@@ -48,20 +48,3 @@ func TestVersion_IsSemver(t *testing.T) {
 		}
 	}
 }
-
-// TestVersion_PreOneZero pins the major version at 0 while we are still
-// pre-1.0. Bumping past 0 is a deliberate marketing event, so this test
-// is the place to update — not silently in the constant.
-func TestVersion_PreOneZero(t *testing.T) {
-	parts := strings.Split(Version, ".")
-	if len(parts) < 1 {
-		t.Fatalf("Version %q has no major component", Version)
-	}
-	major, err := strconv.Atoi(parts[0])
-	if err != nil {
-		t.Fatalf("Version %q has non-numeric major: %v", Version, err)
-	}
-	if major != 0 {
-		t.Fatalf("Version %q major is %d, expected 0 (pre-1.0). Update this test deliberately when shipping 1.0.", Version, major)
-	}
-}

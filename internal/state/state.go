@@ -8,7 +8,7 @@
 // Package state publishes what the editor is currently looking at, so tools outside this process
 // can react to it.
 //
-// Why this exists: SpiceEdit has no IPC, no plugin API, and no way to be queried. That is a
+// Why this exists: Explorr has no IPC, no plugin API, and no way to be queried. That is a
 // deliberate design choice and this package does not change it — nothing is listening, nothing is
 // accepted, and the editor never blocks on a reader. But it means a companion panel (file history,
 // blame, "problems in this file", "run the tests for this file") has no way to know which file is
@@ -55,18 +55,18 @@ type Publisher struct {
 	timer   *time.Timer
 }
 
-// Dir is the directory the snapshot lives in: $XDG_STATE_HOME/spiceedit, else ~/.local/state/
-// spiceedit. This matches where the custom-action log already goes, so the editor keeps to one
+// Dir is the directory the snapshot lives in: $XDG_STATE_HOME/explorr, else ~/.local/state/
+// explorr. This matches where the custom-action log already goes, so the editor keeps to one
 // state directory rather than inventing a second convention.
 func Dir() string {
 	if x := os.Getenv("XDG_STATE_HOME"); x != "" {
-		return filepath.Join(x, "spiceedit")
+		return filepath.Join(x, "explorr")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".local", "state", "spiceedit")
+	return filepath.Join(home, ".local", "state", "explorr")
 }
 
 // NewPublisher returns a publisher writing to Dir()/active.json, or nil if there is no usable

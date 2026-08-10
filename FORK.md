@@ -1,11 +1,8 @@
-# herdr-edit — a fork of [cloudmanic/spice-edit](https://github.com/cloudmanic/spice-edit)
+# Explorr — derived from [vonzelle-vzt/herdr-edit](https://github.com/vonzelle-vzt/herdr-edit), itself a fork of [cloudmanic/spice-edit](https://github.com/cloudmanic/spice-edit)
 
-SpiceEdit is an excellent mouse-first terminal editor by
-[Spicer Matthews](https://github.com/cloudmanic). All the credit for what this is belongs there;
-this fork exists only because a handful of the things it deliberately leaves out are the same
-handful a VS Code user notices on day one.
-
-Licence is unchanged (MIT). Upstream is tracked as the `upstream` remote and merged in.
+Explorr retains the work of Vonzelle Brown's herdr-edit fork and the mouse-first terminal editor
+by [Spicer Matthews](https://github.com/cloudmanic). Licence is unchanged (MIT); inherited
+copyrights and notices remain preserved.
 
 ## What this fork adds
 
@@ -19,7 +16,7 @@ Licence is unchanged (MIT). Upstream is tracked as the `upstream` remote and mer
 | **Word wrap** | Upstream has none: long lines now reflow to the pane width by default, breaking on words and re-wrapping on every resize. `Esc z` toggles it per tab. |
 | **A layout that degrades instead of refusing** | Below 50×24 upstream replaces everything with "Window too small — please resize". Since the tree is a fixed 30 columns, a side panel was only usable in a narrow band. The tree now auto-fits its content — it grows to show full folder names and narrows toward 18 columns as the pane tightens, hiding only below 42 — so a 60-column panel beside an agent still shows files; the floors drop to 24×8. |
 | **Persistent undo** | History died with the process. |
-| **Active-file publishing** | A debounced `{file,line,col,root}` snapshot at `$XDG_STATE_HOME/spiceedit/active.json`. Nothing outside the process could previously know which file was open, which blocks *every* companion panel at once. |
+| **Active-file publishing** | A debounced `{file,line,col,root}` snapshot at `$XDG_STATE_HOME/explorr/active.json`. Nothing outside the process could previously know which file was open, which blocks *every* companion panel at once. |
 
 ## What it does not change
 
@@ -44,9 +41,8 @@ opinionated, and stay here.
 ## Building
 
 ```sh
-make build      # -> bin/herdr-edit
+make build      # -> bin/explorr
 make test       # go test ./... with the race detector
 ```
 
-The binary is deliberately named `herdr-edit`, not `spiceedit`, so it can sit alongside an
-upstream install without either shadowing the other.
+The binary is named `explorr`; upstream's `spiceedit` name remains only in lineage references.

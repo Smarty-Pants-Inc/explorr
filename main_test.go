@@ -15,7 +15,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cloudmanic/spice-edit/internal/state"
+	"github.com/Smarty-Pants-Inc/explorr/internal/state"
 )
 
 // TestResolveArgs_NoArgsRootsCurrentDir keeps the no-arg path simple:
@@ -50,7 +50,7 @@ func TestResolveArgs_DirectoryArgUsesAsRoot(t *testing.T) {
 }
 
 // TestResolveArgs_FileArgRootsParent is the regression test for the
-// "spiceedit main.go" bug: a file argument should root the editor at
+// "explorr main.go" bug: a file argument should root the editor at
 // the file's parent and seed an OpenFile so the user's tab is ready.
 func TestResolveArgs_FileArgRootsParent(t *testing.T) {
 	dir := t.TempDir()
@@ -71,7 +71,7 @@ func TestResolveArgs_FileArgRootsParent(t *testing.T) {
 	}
 }
 
-// TestResolveArgs_BarefilenameRootsCwd covers the common "spiceedit
+// TestResolveArgs_BarefilenameRootsCwd covers the common "explorr
 // foo.go" form where the path has no directory component. The
 // filepath.Dir of "foo.go" is "." — without the empty-string guard
 // we'd hand the editor an empty rootDir and filetree.New would fail.

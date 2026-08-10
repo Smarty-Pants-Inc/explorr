@@ -18,8 +18,8 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/cloudmanic/spice-edit/internal/langconf"
-	"github.com/cloudmanic/spice-edit/internal/theme"
+	"github.com/Smarty-Pants-Inc/explorr/internal/langconf"
+	"github.com/Smarty-Pants-Inc/explorr/internal/theme"
 )
 
 // defaultGutterWidth is the line-number column width for files up to 9999

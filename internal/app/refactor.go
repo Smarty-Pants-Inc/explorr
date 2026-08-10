@@ -31,7 +31,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cloudmanic/spice-edit/internal/lsp"
+	"github.com/Smarty-Pants-Inc/explorr/internal/lsp"
 )
 
 // referencesEvent and renameEvent deliver their answers as posted events, like

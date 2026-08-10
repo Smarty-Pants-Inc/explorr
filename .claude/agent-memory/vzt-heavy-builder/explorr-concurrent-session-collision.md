@@ -1,14 +1,13 @@
 ---
-name: herdr-edit-concurrent-session-collision
-description: herdr-edit is worked on by several simultaneous Claude sessions in ONE checkout — the branch can change under you mid-task and your uncommitted files can be swept into someone else's commit.
+name: explorr-concurrent-session-collision
+description: Explorr can be worked on by several simultaneous Claude sessions in one checkout; the branch can change mid-task and another session can sweep up uncommitted files.
 metadata:
   type: project
 ---
 
-Multiple Claude sessions run against the single `~/github-projects/herdr-edit`
-working copy at the same time (5+ `claude` processes observed concurrently on
-2026-07-31). Treat the git state as **shared and mutable by others** for the
-whole duration of a task.
+Multiple Claude sessions once shared one Explorr working copy. Treat the git
+state as shared and mutable whenever runtime evidence shows more than one session
+using the same checkout.
 
 Observed on 2026-07-31 while implementing Lane B stage 2 (the DAP client):
 
@@ -39,5 +38,3 @@ rewrites the working tree everyone else is editing.
   for a few of your *latest* edits specifically, since a `checkout` would have
   replaced your files with an older committed snapshot silently.
 - Prefer a dedicated git worktree per session when the task is long.
-
-See also [[herdr-edit-verification-gates]].

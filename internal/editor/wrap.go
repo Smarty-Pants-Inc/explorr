@@ -25,7 +25,7 @@ package editor
 import (
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/cloudmanic/spice-edit/internal/theme"
+	"github.com/Smarty-Pants-Inc/explorr/internal/theme"
 )
 
 // wrapSegment is one screen row's worth of a buffer line: rune indices into the line, End exclusive.

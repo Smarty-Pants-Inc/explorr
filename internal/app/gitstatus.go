@@ -26,8 +26,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/cloudmanic/spice-edit/internal/editor"
-	"github.com/cloudmanic/spice-edit/internal/filetree"
+	"github.com/Smarty-Pants-Inc/explorr/internal/editor"
+	"github.com/Smarty-Pants-Inc/explorr/internal/filetree"
 )
 
 // gitStatus is the snapshot of a single git status run. IsRepo distinguishes

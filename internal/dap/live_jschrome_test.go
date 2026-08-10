@@ -171,7 +171,7 @@ console.log('` + chromeLoadedSentinel + `');
 	if err := os.WriteFile(script, []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	page := "<!doctype html>\n<html><head><title>herdr-edit chrome oracle</title></head>\n" +
+	page := "<!doctype html>\n<html><head><title>explorr chrome oracle</title></head>\n" +
 		"<body><script src=\"/app.js\"></script></body></html>\n"
 	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte(page), 0o644); err != nil {
 		t.Fatal(err)

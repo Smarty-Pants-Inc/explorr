@@ -14,8 +14,8 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/cloudmanic/spice-edit/internal/editor"
-	"github.com/cloudmanic/spice-edit/internal/lsp"
+	"github.com/Smarty-Pants-Inc/explorr/internal/editor"
+	"github.com/Smarty-Pants-Inc/explorr/internal/lsp"
 )
 
 // Language-server diagnostics, drawn as an overlay on top of the rendered tab.

@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-herdr-edit is a Go terminal editor. The module path is still `github.com/cloudmanic/spice-edit` — kept from upstream so merges stay clean — but the repo is `vonzelle-vzt/herdr-edit` and the binary is `herdr-edit`. The CLI entry point is `main.go`.
+Explorr is a Go terminal editor. Its module path is `github.com/Smarty-Pants-Inc/explorr`, its repository is `Smarty-Pants-Inc/explorr`, and its binary is `explorr`. Its inherited lineage is documented in `FORK.md` and `NOTICE`; preserve those notices and copyrights. The CLI entry point is `main.go`.
 
 Packages under `internal/`:
 
@@ -18,20 +18,21 @@ Packages under `internal/`:
 | `search` | workspace search, reusing `editor.Matches` so there is one matcher |
 | `state` | the `active.json` / `open-request.json` / `debug-session.json` contracts |
 | `finder` | the background file index and fuzzy scorer |
-| supporting | `clipboard`, `customactions`, `format`, `icons`, `spiceconfig`, `theme`, `version` |
+| supporting | `clipboard`, `customactions`, `format`, `icons`, `config`, `theme`, `version` |
 
-Tests sit beside source files as `*_test.go`, in the SAME package. (Upstream's `website/` Hugo site and `Formula/spice-edit.rb` were removed in this fork — they belong to cloudmanic/spice-edit.)
+Tests sit beside source files as `*_test.go`, in the SAME package. The upstream website was not carried into Explorr.
 
 ## Build, Test, and Development Commands
 
 - `make run`: run the editor in the current directory with `go run .`.
-- `make build`: compile `./bin/herdr-edit`.
+- `make build`: compile `./bin/explorr`.
 - `make build-linux`: cross-compile a static `linux/amd64` binary.
 - `make test`: run `go test -race ./...`; use before PRs.
 - `make test-short`: quick `go test -short ./...` loop while iterating.
 - `make coverage`: write `coverage.out` and `coverage.html`.
 - `make tidy`: sync `go.mod` and `go.sum`.
-- `make install`: install `./bin/herdr-edit` into `/usr/local/bin`.
+- `make install`: install `./bin/explorr` into `/usr/local/bin`.
+- `python3 scripts/set-release-version.py --check`: require the binary and bundled HerdR plugin versions to match; pass a version argument to update both.
 
 There are no `site-*` targets — the Hugo site left with the fork.
 

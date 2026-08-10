@@ -33,7 +33,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/cloudmanic/spice-edit/internal/editor"
+	"github.com/Smarty-Pants-Inc/explorr/internal/editor"
 )
 
 // posAtLine is the start of a line, as a Position.

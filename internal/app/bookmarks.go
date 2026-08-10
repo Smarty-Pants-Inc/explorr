@@ -29,7 +29,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/cloudmanic/spice-edit/internal/editor"
+	"github.com/Smarty-Pants-Inc/explorr/internal/editor"
 )
 
 // bookmark is one pinned location.

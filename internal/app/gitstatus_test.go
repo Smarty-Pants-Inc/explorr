@@ -22,8 +22,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cloudmanic/spice-edit/internal/editor"
-	"github.com/cloudmanic/spice-edit/internal/filetree"
+	"github.com/Smarty-Pants-Inc/explorr/internal/editor"
+	"github.com/Smarty-Pants-Inc/explorr/internal/filetree"
 )
 
 // TestLoadGitStatus_NotARepo verifies that pointing the loader at a

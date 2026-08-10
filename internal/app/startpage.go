@@ -15,7 +15,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/cloudmanic/spice-edit/internal/filetree"
+	"github.com/Smarty-Pants-Inc/explorr/internal/filetree"
 )
 
 // The start page replaces the old "No file open" placeholder.

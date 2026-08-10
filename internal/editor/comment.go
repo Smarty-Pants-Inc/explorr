@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/cloudmanic/spice-edit/internal/langconf"
+	"github.com/Smarty-Pants-Inc/explorr/internal/langconf"
 )
 
 // lineCommentByExt maps common source file extensions to their single-line

@@ -65,7 +65,7 @@ func TestBreakpointStore_RoundTrips(t *testing.T) {
 }
 
 // TestBreakpointStore_DoesNotClobberOtherRoots writes breakpoints for two
-// different roots (as two herdr-edit instances on two projects would) and
+// different roots (as two Explorr instances on two projects would) and
 // checks both survive — a naive whole-file overwrite would erase whichever
 // root wrote first.
 func TestBreakpointStore_DoesNotClobberOtherRoots(t *testing.T) {

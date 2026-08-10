@@ -24,7 +24,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/cloudmanic/spice-edit/internal/theme"
+	"github.com/Smarty-Pants-Inc/explorr/internal/theme"
 )
 
 // TestIsImageExt covers the small set of extensions we recognise — case

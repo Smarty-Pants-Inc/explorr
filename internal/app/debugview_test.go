@@ -20,8 +20,8 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/cloudmanic/spice-edit/internal/dap"
-	"github.com/cloudmanic/spice-edit/internal/editor"
+	"github.com/Smarty-Pants-Inc/explorr/internal/dap"
+	"github.com/Smarty-Pants-Inc/explorr/internal/editor"
 )
 
 // fakeAdapterClient returns a REAL dap.Client attached to a pipe nothing ever

@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/cloudmanic/spice-edit/internal/state"
+	"github.com/Smarty-Pants-Inc/explorr/internal/state"
 )
 
 // seedNavApp opens a tab with numbered lines so a jump can be checked by

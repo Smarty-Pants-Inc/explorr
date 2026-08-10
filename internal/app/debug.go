@@ -52,10 +52,10 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/cloudmanic/spice-edit/internal/dap"
-	"github.com/cloudmanic/spice-edit/internal/editor"
-	"github.com/cloudmanic/spice-edit/internal/lsp"
-	"github.com/cloudmanic/spice-edit/internal/state"
+	"github.com/Smarty-Pants-Inc/explorr/internal/dap"
+	"github.com/Smarty-Pants-Inc/explorr/internal/editor"
+	"github.com/Smarty-Pants-Inc/explorr/internal/lsp"
+	"github.com/Smarty-Pants-Inc/explorr/internal/state"
 )
 
 // debugStartTimeout bounds bringing a session up. Generous because the adapter

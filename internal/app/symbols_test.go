@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cloudmanic/spice-edit/internal/lsp"
+	"github.com/Smarty-Pants-Inc/explorr/internal/lsp"
 )
 
 // TestOutline_LoadsIntoThePalette pins that the outline reuses the palette

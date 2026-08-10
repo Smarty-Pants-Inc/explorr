@@ -13,7 +13,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/cloudmanic/spice-edit/internal/theme"
+	"github.com/Smarty-Pants-Inc/explorr/internal/theme"
 )
 
 // wrapTab builds a tab with the given lines and wrapping on.

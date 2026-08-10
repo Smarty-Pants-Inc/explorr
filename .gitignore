@@ -1,5 +1,6 @@
 # Compiled binaries.
 /bin/
+/dist/
 
 # macOS metadata.
 .DS_Store

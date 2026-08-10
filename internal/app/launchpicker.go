@@ -51,8 +51,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cloudmanic/spice-edit/internal/dap"
-	"github.com/cloudmanic/spice-edit/internal/lsp"
+	"github.com/Smarty-Pants-Inc/explorr/internal/dap"
+	"github.com/Smarty-Pants-Inc/explorr/internal/lsp"
 )
 
 // launchState caches a project's launch.json and remembers which configuration

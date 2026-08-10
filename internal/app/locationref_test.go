@@ -14,7 +14,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cloudmanic/spice-edit/internal/editor"
+	"github.com/Smarty-Pants-Inc/explorr/internal/editor"
 )
 
 // TestGoToLocationJumpsFromAReferencesList pins bug 1: handleReferences

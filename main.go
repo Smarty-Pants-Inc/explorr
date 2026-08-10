@@ -5,7 +5,7 @@
 // Copyright: 2026 Cloudmanic, LLC. All rights reserved.
 // =============================================================================
 
-// Command spiceedit is SpiceEdit — an opinionated, mouse-first terminal code editor.
+// Command explorr is Explorr — an opinionated, mouse-first terminal code editor.
 // It is designed for the SSH-into-a-box workflow: a single static binary,
 // drop it on the remote host, run it inside tmux/zellij, and you get a
 // VS-Code-shaped UI (file tree, tabs, syntax highlighting, status bar) you
@@ -21,9 +21,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/cloudmanic/spice-edit/internal/app"
-	"github.com/cloudmanic/spice-edit/internal/state"
-	"github.com/cloudmanic/spice-edit/internal/version"
+	"github.com/Smarty-Pants-Inc/explorr/internal/app"
+	"github.com/Smarty-Pants-Inc/explorr/internal/state"
+	"github.com/Smarty-Pants-Inc/explorr/internal/version"
 )
 
 // cliAction is the high-level decision the arg parser hands back: edit
@@ -39,6 +39,7 @@ const (
 	actionHelp      cliAction = "help"
 	actionOpenAt    cliAction = "open-at"
 	actionHerdROpen cliAction = "herdr-open"
+	actionHerdR     cliAction = "herdr"
 	actionDebug     cliAction = "debug"
 )
 
@@ -52,9 +53,10 @@ type cliResult struct {
 	OpenLine int
 	OpenCol  int
 
-	// DebugAction is the verb for actionDebug, already validated against
-	// state.ValidDebugAction. Empty for every other action.
+	// DebugAction and HerdRAction hold their validated subcommands.
+	// Both are empty for every other action.
 	DebugAction string
+	HerdRAction string
 
 	Err error
 }
@@ -127,7 +129,7 @@ func parseLocalFileURL(raw string) (string, int, int, error) {
 //   - a flag (--version / -v / --help / -h) → print-and-exit action
 //   - a directory path → use as the editor's root
 //   - a file path → root at the file's parent dir, open the file in a tab
-//   - a missing path → assume "spiceedit foo.go" means "create foo.go" —
+//   - a missing path → assume "explorr foo.go" means "create foo.go" —
 //     same intuition as `vim foo.go` on a non-existent file.
 //
 // Pure function; no IO beyond os.Stat. Returns a result the caller acts
@@ -142,6 +144,16 @@ func resolveArgs(args []string) cliResult {
 		return cliResult{Action: actionVersion}
 	case "--help", "-h", "help":
 		return cliResult{Action: actionHelp}
+	case "herdr":
+		if len(args) != 2 {
+			return cliResult{Err: errors.New("herdr needs one action: install | check | remove")}
+		}
+		switch args[1] {
+		case "install", "check", "remove":
+			return cliResult{Action: actionHerdR, HerdRAction: args[1]}
+		default:
+			return cliResult{Err: fmt.Errorf("unknown herdr action %q — want install, check, or remove", args[1])}
+		}
 	case "--explorer":
 		if len(args) > 2 {
 			return cliResult{Err: errors.New("--explorer accepts at most one directory")}
@@ -253,22 +265,25 @@ func resolveArgs(args []string) cliResult {
 // the editor is itself the help — once running, the ≡ menu lists every
 // action.
 func printHelp() {
-	fmt.Println(`SpiceEdit — opinionated mouse-first terminal code editor.
+	fmt.Println(`Explorr — opinionated mouse-first terminal code editor.
 
 Usage:
-  spiceedit                     Open the current directory.
-  spiceedit <directory>         Open a project directory.
-  spiceedit <file>              Open a file (its parent becomes the project root).
-  spiceedit --explorer [directory]  Open HerdR's file-tree-only workspace sidebar.
-  spiceedit --open-at F:L[:C]   Ask a RUNNING editor to jump to that location.
-  spiceedit --debug ACTION      Drive a RUNNING editor's debugger. ACTION is one of
-                                start, continue, next, stepIn, stepOut, pause, stop,
-                                or toggle-breakpoint FILE:LINE.
-  spiceedit --version           Print the version and exit.
-  spiceedit --help              Print this help and exit.
+  explorr                         Open the current directory.
+  explorr <directory>             Open a project directory.
+  explorr <file>                  Open a file (its parent becomes the project root).
+  explorr --explorer [directory]  Open HerdR's file-tree-only workspace sidebar.
+  explorr --open-at F:L[:C]       Ask a RUNNING editor to jump to that location.
+  explorr --debug ACTION          Drive a RUNNING editor's debugger. ACTION is one of
+                                  start, continue, next, stepIn, stepOut, pause, stop,
+                                  or toggle-breakpoint FILE:LINE.
+  explorr herdr install           Install and link Explorr's HerdR plugin.
+  explorr herdr check             Verify the installed HerdR plugin.
+  explorr herdr remove            Unlink and remove the HerdR plugin.
+  explorr --version               Print the version and exit.
+  explorr --help                  Print this help and exit.
 
 Once running, click ≡ (top-left), right-click anywhere, or double-tap Esc
-for the action menu. See https://github.com/cloudmanic/spice-edit for
+for the action menu. See https://github.com/Smarty-Pants-Inc/explorr for
 hotkeys and the full feature list.`)
 }
 
@@ -279,32 +294,40 @@ hotkeys and the full feature list.`)
 func main() {
 	res := resolveArgs(os.Args[1:])
 	if res.Err != nil {
-		fmt.Fprintln(os.Stderr, "spiceedit:", res.Err)
+		fmt.Fprintln(os.Stderr, "explorr:", res.Err)
 		os.Exit(1)
 	}
 
 	switch res.Action {
 	case actionVersion:
-		fmt.Println("herdr-edit", version.Version, "(fork of cloudmanic/spice-edit)")
+		fmt.Println("explorr", version.Version)
 		return
 	case actionHelp:
 		printHelp()
+		return
+	case actionHerdR:
+		message, err := runHerdRPluginCommand(res.HerdRAction)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "explorr:", err)
+			os.Exit(1)
+		}
+		fmt.Println(message)
 		return
 	case actionOpenAt:
 		path, line, col := state.SplitLocation(res.OpenFile)
 		abs, err := filepath.Abs(path)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "herdr-edit:", err)
+			fmt.Fprintln(os.Stderr, "explorr:", err)
 			os.Exit(1)
 		}
 		if err := state.WriteOpenRequest(abs, line, col); err != nil {
-			fmt.Fprintln(os.Stderr, "herdr-edit:", err)
+			fmt.Fprintln(os.Stderr, "explorr:", err)
 			os.Exit(1)
 		}
 		return
 	case actionHerdROpen:
 		if err := app.OpenFileInHerdRTab(res.OpenFile, res.OpenLine, res.OpenCol); err != nil {
-			fmt.Fprintln(os.Stderr, "herdr-edit:", err)
+			fmt.Fprintln(os.Stderr, "explorr:", err)
 			os.Exit(1)
 		}
 		return
@@ -319,13 +342,13 @@ func main() {
 			path, l, _ := state.SplitLocation(res.OpenFile)
 			p, err := filepath.Abs(path)
 			if err != nil {
-				fmt.Fprintln(os.Stderr, "herdr-edit:", err)
+				fmt.Fprintln(os.Stderr, "explorr:", err)
 				os.Exit(1)
 			}
 			abs, line = p, l
 		}
 		if err := state.WriteDebugRequest(res.DebugAction, abs, line); err != nil {
-			fmt.Fprintln(os.Stderr, "herdr-edit:", err)
+			fmt.Fprintln(os.Stderr, "explorr:", err)
 			os.Exit(1)
 		}
 		return
@@ -347,13 +370,13 @@ func main() {
 		a, err = app.New(res.RootDir)
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "spiceedit: failed to start:", err)
+		fmt.Fprintln(os.Stderr, "explorr: failed to start:", err)
 		os.Exit(1)
 	}
 	defer a.Close()
 
 	if err := a.Run(); err != nil {
-		fmt.Fprintln(os.Stderr, "spiceedit:", err)
+		fmt.Fprintln(os.Stderr, "explorr:", err)
 		os.Exit(1)
 	}
 }

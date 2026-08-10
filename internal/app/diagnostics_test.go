@@ -17,7 +17,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/cloudmanic/spice-edit/internal/lsp"
+	"github.com/Smarty-Pants-Inc/explorr/internal/lsp"
 )
 
 // diag is a small constructor so the tests read as behaviour rather than as

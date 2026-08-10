@@ -5,17 +5,16 @@
   Copyright: 2026 Cloudmanic, LLC. (upstream) / 2026 Vonzelle Brown (fork sections)
 -->
 
-# CLAUDE.md — herdr-edit
+# CLAUDE.md — Explorr
 
 Project-specific guidance for Claude Code. Read this first; it captures
 conventions and design decisions that aren't obvious from the code alone.
 
 ## What this project is
 
-herdr-edit is a FORK of [cloudmanic/spice-edit](https://github.com/cloudmanic/spice-edit).
-Read FORK.md and README.md for what the fork adds and why. Everything below
-that is not marked as a fork change is upstream's design, and upstream's
-design decisions are to be preserved.
+Explorr retains inherited upstream work documented in `FORK.md` and `NOTICE`.
+Read those files for lineage and `README.md` for current product guidance. Preserve
+upstream design decisions, notices, and copyrights unless a change explicitly requires otherwise.
 
 It is an opinionated, **mouse-first** terminal code editor aimed at
 SSH-into-tmux workflows, and at living in a herdr pane beside an AI agent. It looks and behaves like a tiny VS Code: file
@@ -36,39 +35,27 @@ features, make sure they're reachable from the main menu first.
 
 ## Module / repo
 
-- Module: `github.com/cloudmanic/spice-edit` (import path kept from upstream to keep
-  merges clean; the REPO is github.com/vonzelle-vzt/herdr-edit)
-- Binary name: `herdr-edit` (Makefile, goreleaser and the brew formula all
-  assume this). Deliberately NOT `spiceedit`, so this can sit alongside an
-  upstream install without either shadowing the other.
-- Brew tap: this same repo, `Formula/` directory (no separate tap repo).
-  🔴 The goreleaser `brews.repository` MUST point at vonzelle-vzt/herdr-edit.
-  Inherited from upstream it pointed at cloudmanic/spice-edit, so the first
-  release here tried to commit a formula into someone else's repository; only
-  a GitHub 403 stopped it.
+- Module: `github.com/Smarty-Pants-Inc/explorr`; repository: `Smarty-Pants-Inc/explorr`.
+- Binary name: `explorr`. The Makefile, GoReleaser configuration, formula
+  renderer, and Homebrew formula must agree on it.
+- Brew tap: this same repository's `Formula/` directory (no separate tap repo).
+  🔴 `scripts/render-homebrew-formula.py` MUST use only
+  `Smarty-Pants-Inc/explorr` release URLs, never either upstream source.
 
 ### Never push to upstream
-`cloudmanic/spice-edit` is someone else's repo. Two guards, installed by
-`scripts/install-guards.sh` (re-run it after a fresh clone — hooks live in
-`.git/` and are not cloned):
-
-1. `remote.upstream.pushurl = DISABLED` — stops `git push upstream`.
-2. A `pre-push` hook refusing any URL containing `cloudmanic/spice-edit`,
-   in either https or ssh spelling.
+The repositories recorded as upstream in `scripts/install-guards.sh` are not Explorr's publish
+targets. Re-run that script after a fresh clone because hooks live in `.git/` and are not cloned;
+its guards must refuse pushes to every upstream repository.
 
 Note git runs `pre-push` only AFTER connecting, so today the 403 is what you
 actually see. The hook is what protects you the day that 403 stops happening —
 a permission check is not a design. Contribute upstream by pull request.
 
-🔴 **Both guards cover `git push`. Neither covers `gh pr create`.** In a repo
-GitHub knows is a fork, bare `gh pr create` defaults the **base to the parent**,
-so it opens the PR against `cloudmanic/spice-edit` — pushing our branch into
-someone else's review queue. Observed: it fails with *"No commits between
-cloudmanic:main and vonzelle-vzt:…"*, which reads like a branch problem and is
-actually the wrong repository. Always be explicit:
+🔴 **Both guards cover `git push`. Neither covers `gh pr create`.** In a forked
+repository, bare `gh pr create` can default the base to a parent. Always be explicit:
 
 ```sh
-gh pr create --repo vonzelle-vzt/herdr-edit --base main --head <branch>
+gh pr create --repo Smarty-Pants-Inc/explorr --base main --head <branch>
 ```
 
 The `--repo` flag is the guard here; there is no hook that can catch this one,
@@ -84,10 +71,10 @@ internal/editor/tab.go        Tab: path, buffer, cursor, anchor, scroll, dirty s
 internal/editor/highlight.go  Chroma → []tcell.Style per line
 internal/filetree/filetree.go Lazy tree, identity-preserving refresh, hit-test, render
 internal/clipboard/clipboard.go OSC 52 to /dev/tty with tmux passthrough wrap
-internal/spiceconfig/spiceconfig.go ~/.config/spiceedit/config.json loader (icons mode)
+internal/config/config.go         ~/.config/explorr/config.json loader (icons mode)
 internal/icons/icons.go       Nerd Font detection + per-file glyph mapping
 internal/theme/theme.go       Tokyo Night palette + syntax color mapping
-internal/version/version.go   const Version = "x.y.z" — single line, CI bumps it
+internal/version/version.go   Binary version; scripts/set-release-version.py keeps plugin version equal
 
 FORK ADDITIONS
 internal/lsp/                 LSP client: protocol types, stdio transport, server registry
@@ -594,7 +581,7 @@ until a line contains an emoji or CJK text. Convert at the boundary
 
 ```sh
 make run          # go run . in current dir
-make build        # build to ./bin/herdr-edit
+make build        # build to ./bin/explorr
 make build-linux  # cross-compile linux/amd64
 make install      # go install to $GOPATH/bin
 make tidy         # go mod tidy
@@ -606,54 +593,15 @@ UI behavior, build and run it against a real directory.
 
 ## Releases (don't break this)
 
-Pushes to `main` trigger `.github/workflows/release.yml`:
+`.github/workflows/release.yml` is **manual-only** during the rename milestone.
+Dispatch it deliberately from `main`; `scripts/set-release-version.py` requires the binary and
+bundled HerdR plugin versions to match, updates both for an automatic patch bump, tags `v<x.y.z>`,
+runs GoReleaser, then renders `Formula/explorr.rb` from the release checksums and commits it back to
+this repository with `[skip ci]`.
 
-1. Reads `internal/version/version.go`.
-2. **If that file was edited in the pushed commit**, the version is used
-   as-is (manual major/minor bump). **Otherwise** the patch is
-   auto-bumped, committed back to main with `[skip ci]`, and pushed.
-3. Tags `v<x.y.z>`.
-4. GoReleaser cross-compiles, attaches archives to a GitHub Release,
-   and writes `Formula/herdr-edit.rb` back into THIS fork (using the
-   default `GITHUB_TOKEN` — no PAT). The formula commit also carries
-   `[skip ci]` to break the loop.
-
-If you're touching the workflow or `.goreleaser.yml`, make sure both
-auto-commits keep their `[skip ci]` markers — without them the workflow
-loops forever.
-
-🔴 **Never write that marker in a commit message you want CI to run on.** GitHub
-scans the **entire** message, body included — so explaining the marker in prose opts
-the commit out. Observed: a commit whose body described the changelog filter produced
-**no workflow runs at all**, neither Test nor Release, which reads like a broken
-trigger rather than a message that opted out. Describe it ("the CI-skip marker"),
-never spell it.
-
-🔴 **A source build goes stale silently, and merging is what makes it stale.** Every
-push to `main` auto-tags a release, so `go build -o ~/.local/bin/herdr-edit .` from
-last week is now behind — while still being first on `PATH` and reporting no
-problem at all. Observed for real: a locally built 0.5.0 running against a tap at
-0.5.4, which means a bug you already fixed keeps reproducing.
-**Rebuild after every pull.** `herdr-extensions doctor` now compares the binary on
-`PATH` against the version in the tapped formula and warns when it is behind.
-
-🔴 **The git identity must stay in its own ungated step.** It used to live inside
-`Commit version bump`, which is gated on the auto-bump path (step 2 above), and
-`Tag release` borrowed it as a side effect. So hand-editing `version.go` — the
-documented way to do a manual major/minor bump — skipped the bump step and left
-`git tag -a` with no committer: `fatal: empty ident name`, job dead in 17s,
-nothing tagged and nothing shipped. That path had never once run successfully.
-A step that configures state must not be gated on a branch other steps depend on.
-
-🔴 **Do not re-add a Pages dispatch.** Upstream deploys a marketing site from
-`pages.yml`; this fork has no such workflow, so the inherited
-`gh workflow run pages.yml` step failed with *"HTTP 422: Workflow does not have
-workflow_dispatch trigger"* and took the job down with it. Releases v0.1.2
-through v0.1.6 are all marked FAILED for that reason alone — **after** tagging,
-building five platforms, publishing the Release and writing the formula. A red
-release that actually shipped is worse than either outcome alone, because a
-genuine GoReleaser failure looks identical. Same shape as the `brews.repository`
-bug: inherited upstream config pointing at infrastructure this fork lacks.
+🔴 **Do not re-add a Pages dispatch.** Explorr has no Pages workflow. The inherited upstream
+dispatch failed after a release had already shipped; restore one only with a real Pages workflow
+that declares `workflow_dispatch`.
 
 ## What NOT to add
 
@@ -666,7 +614,7 @@ bug: inherited upstream config pointing at infrastructure this fork lacks.
 - CGO dependencies. The whole point is one static binary.
 - Tree-sitter. We use Chroma intentionally — pure Go, no setup.
 - A separate `homebrew-tap` repo. The formula lives here under
-  `Formula/` and that's deliberate.
+  `Formula/` and the release workflow renders it from GoReleaser checksums.
 - A plugin system. Upstream said "no config file / dotfile / plugin system"
   and the *plugin* half still holds. The fork does read a small
   `config.json` (icons, `tree.respectGitignore`), because a filter that

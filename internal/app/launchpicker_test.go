@@ -16,7 +16,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/cloudmanic/spice-edit/internal/dap"
+	"github.com/Smarty-Pants-Inc/explorr/internal/dap"
 )
 
 // writeLaunchJSON drops a .vscode/launch.json into root and returns its path.

@@ -15,7 +15,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/cloudmanic/spice-edit/internal/toolpath"
+	"github.com/Smarty-Pants-Inc/explorr/internal/toolpath"
 )
 
 // Manager owns one server per language per project and routes documents to the

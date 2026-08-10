@@ -15,7 +15,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cloudmanic/spice-edit/internal/lsp"
+	"github.com/Smarty-Pants-Inc/explorr/internal/lsp"
 )
 
 // TestLSPStatusTextNoManager pins the case app.New never reaches for a

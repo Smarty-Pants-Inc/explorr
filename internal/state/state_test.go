@@ -161,7 +161,7 @@ func TestReaderNeverSeesAPartialFile(t *testing.T) {
 
 func TestDirHonoursXDG(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", "/tmp/xdg")
-	if got, want := Dir(), filepath.Join("/tmp/xdg", "spiceedit"); got != want {
+	if got, want := Dir(), filepath.Join("/tmp/xdg", "explorr"); got != want {
 		t.Fatalf("Dir() = %q want %q", got, want)
 	}
 }

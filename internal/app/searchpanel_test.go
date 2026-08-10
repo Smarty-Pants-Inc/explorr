@@ -16,8 +16,8 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/cloudmanic/spice-edit/internal/finder"
-	"github.com/cloudmanic/spice-edit/internal/search"
+	"github.com/Smarty-Pants-Inc/explorr/internal/finder"
+	"github.com/Smarty-Pants-Inc/explorr/internal/search"
 )
 
 // waitForSearchResults blocks until the goroutine started by

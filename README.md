@@ -7,36 +7,21 @@
   <picture>
     <source srcset="docs/assets/banner.webp" type="image/webp">
     <img src="docs/assets/banner.jpg"
-         alt="herdr-edit — VS Code intelligence, terminal speed. A mouse-first terminal editor showing a file explorer, Rust source with an inline diagnostic on line 134, a hover card documenting the width() method, and an AI agent pane suggesting a fix. Feature chips read: LSP Diagnostics, Hover, Go to Definition, Git-aware Tree, Replace, Word Wrap."
+         alt="Explorr — VS Code intelligence, terminal speed. A mouse-first terminal editor showing a file explorer, Rust source with an inline diagnostic on line 134, a hover card documenting the width() method, and an AI agent pane suggesting a fix. Feature chips read: LSP Diagnostics, Hover, Go to Definition, Git-aware Tree, Replace, Word Wrap."
          width="100%">
   </picture>
 </p>
 
-# herdr-edit
+# Explorr
 
 > A mouse-first terminal code editor **with real language intelligence** — inline diagnostics,
-> hover, and go-to-definition — built to sit beside an AI agent in a [herdr](https://herdr.dev) pane.
+> hover, and go-to-definition.
 
-Built on [**cloudmanic/spice-edit**](https://github.com/cloudmanic/spice-edit) by
-[Spicer Matthews](https://github.com/cloudmanic) — a genuinely good editor, and the foundation this
-stands on. That base gives us the buffer, the renderer, the mouse UI and the event loop; the fork adds
-the language intelligence and the responsive layout on top. See
-[What's new in this fork](#whats-new-in-this-fork) for exactly which parts are which.
-
-This is the editor half of a two-part stack. The other half is
-[**herdr-extensions**](https://github.com/vonzelle-vzt/herdr-extensions) — original work, no upstream —
-which turns a herdr session into an IDE: 15 panels, the layout, the keybindings, a live app
-preview, screenshot paste, and the installer that puts this editor in place.
-
-```
-herdr-extensions   the IDE: panels, layout, install    (100% original)
-herdr-edit         the editor those panels drive       ← you are here
-                   ├─ internal/lsp     language intelligence   (new here)
-                   └─ core editor      buffer, render, mouse    (from spice-edit)
-```
-
-Either can be used without the other: the extension falls back to upstream `spiceedit`, and this
-editor runs standalone on any terminal.
+Explorr derives from [**vonzelle-vzt/herdr-edit**](https://github.com/vonzelle-vzt/herdr-edit),
+itself based on [**cloudmanic/spice-edit**](https://github.com/cloudmanic/spice-edit) by
+[Spicer Matthews](https://github.com/cloudmanic). It retains that lineage's MIT licence,
+copyright notices, and mouse-first editor foundation while adding language intelligence and a
+responsive layout.
 
 ---
 
@@ -44,7 +29,7 @@ editor runs standalone on any terminal.
 
 <p align="center">
   <img src="docs/assets/demo.gif"
-       alt="herdr-edit: opening a Go project, walking the file tree, a live gopls diagnostic rendered inline at the end of the line, the command palette, the outline, and the diff view."
+       alt="Explorr: opening a Go project, walking the file tree, a live gopls diagnostic rendered inline at the end of the line, the command palette, the outline, and the diff view."
        width="100%">
 </p>
 
@@ -87,7 +72,7 @@ diagnostic reported inline at the end of the offending line:
 
 <p align="center">
   <img src="docs/assets/conflict-resolution.png"
-       alt="A real merge conflict in herdr-edit: green tint on the 'ours' body, blue tint on the 'theirs' body, conflict gutter glyphs, live gopls diagnostics inline reading 'expected statement, found &lt;&lt;', and lsp:gopls in the status bar."
+       alt="A real merge conflict in Explorr: green tint on the 'ours' body, blue tint on the 'theirs' body, conflict gutter glyphs, live gopls diagnostics inline reading 'expected statement, found &lt;&lt;', and lsp:gopls in the status bar."
        width="100%">
 </p>
 
@@ -138,7 +123,7 @@ So this fork's headline is an **LSP client**. It is hand-rolled against the Go s
 no third-party dependencies, and is verified against real language servers:
 
 ```
-$ herdr-edit main.go        # with gopls installed
+$ explorr main.go        # with gopls installed
   line 4 col 2  [UndeclaredName] error: undefined: undefinedThing
 ```
 
@@ -164,7 +149,7 @@ embeds standalone Monaco with no LSP at all.
 | **A command palette** | `Esc k`. Fuzzy search over every action, built from the action menu rather than from a list of its own — a second list is a second thing to forget to update. Scored with the same matcher as the file finder, because two notions of "fuzzy" in one program is a bug the user experiences as inconsistency. |
 | **Inline git blame** | `Esc b`. Author, coarse relative age and subject, dimmed at end-of-line. Only the cursor's line is blamed — `git blame` on a whole file is linear in history and would run on every scroll. Diagnostics win the end of the line when both want it. |
 | **Go to line, select all** | `Esc g`, `Esc a`. `SelectAll` had been complete and unit-tested in `internal/editor` with **zero** non-test callers; only the wiring was missing. |
-| **`--open-at`, the reverse contract** | `herdr-edit --open-at path:line[:col]` asks an **already-running** editor to jump there. `active.json` flows editor → panels; this flows panels → editor, which is what turns a read-only review into an edit: the Review panel hands you a line from the agent's diff and you land on it with a language server attached. |
+| **`--open-at`, the reverse contract** | `explorr --open-at path:line[:col]` asks an **already-running** editor to jump there. `active.json` flows editor → panels; this flows panels → editor, which is what turns a read-only review into an edit: the Review panel hands you a line from the agent's diff and you land on it with a language server attached. |
 | **Merge-conflict detection and resolution** | A conflicted file opens with the `ours` and `theirs` bodies tinted, conflict-marker gutter glyphs, and the language server still running *through* the markers — so a syntax error inside a half-resolved conflict is flagged the same as anywhere else. Seven resolution actions (take ours, take theirs, take both, …) are reachable from the `≡` menu and the command palette; the file tree marks a conflicted file `U` before you have opened it. |
 | **A diff view** | `Esc o` opens the active file's diff as a real tab, and pressing it again flips the baseline between your branch's **merge-base** and **HEAD** — "what does this branch change" versus "what have I not committed", which are different questions and the first is the one you ask of an agent's work. Built as a *synthetic tab* rather than a new render mode: word wrap already taught this codebase what a second geometry path costs, so a tab whose buffer happens to hold diff text inherits scrolling, search, selection and mouse hit-testing for free, and refuses to save. |
 | **Rename and find-references** | `Esc y` renames a symbol project-wide; `Esc j` lists every use. Rename decodes **both** WorkspaceEdit wire shapes — servers send either `changes` or `documentChanges`, and handling one makes rename silently do nothing against half of them. Edits apply back-to-front per file, because changing text length at one position invalidates every position after it. |
@@ -297,7 +282,7 @@ Two packages exist only here, and they are the ones the headline rests on:
 | Package | Lines | What it is |
 | --- | --- | --- |
 | **`internal/lsp`** | 1,740 | The whole LSP client — protocol types, stdio transport, server registry, UTF-16 ↔ rune conversion. Hand-rolled on the standard library, no new dependencies. |
-| **`internal/state`** | 323 | The `active.json` contract: publishes `{file,line,col,root}` so companion tools can follow the cursor. Every herdr-extensions panel reads it. |
+| **`internal/state`** | 323 | The `active.json` contract: publishes `{file,line,col,root}` so companion tools can follow the cursor. |
 
 And inside packages shared with upstream, these files are new:
 
@@ -318,46 +303,44 @@ original headers, and files new here carry ours.
 
 ## Install
 
-**Most people should not install this directly.**
-[herdr-extensions](https://github.com/vonzelle-vzt/herdr-extensions) installs it for you, along with
-the panels, the keybindings and the rest of the IDE:
+Explorr has no published release yet. After the first manually cut release, install it with:
 
 ```sh
-brew tap vonzelle-vzt/herdr-extensions https://github.com/vonzelle-vzt/herdr-extensions
-brew install vonzelle-vzt/herdr-extensions/herdr-extensions
-herdr-extensions install        # brings this editor with it
+brew tap Smarty-Pants-Inc/explorr https://github.com/Smarty-Pants-Inc/explorr
+brew install Smarty-Pants-Inc/explorr/explorr
+explorr --version
 ```
 
-**Standalone**, if you want the editor on its own:
+Until then, build from source with Go 1.24+ and no CGO:
 
 ```sh
-brew tap vonzelle-vzt/herdr-edit https://github.com/vonzelle-vzt/herdr-edit
-brew install vonzelle-vzt/herdr-edit/herdr-edit
-herdr-edit --version
+git clone https://github.com/Smarty-Pants-Inc/explorr
+cd explorr
+go build -o explorr .
+./explorr --version
 ```
 
-**From source** — Go 1.24+ (per `go.mod`), no CGO, no third-party build steps:
+The one-line installer will likewise be available after that release:
 
 ```sh
-git clone https://github.com/vonzelle-vzt/herdr-edit
-cd herdr-edit
-make build          # -> bin/herdr-edit
-make test           # go test -race ./...   (14 packages)
-make install        # -> $GOPATH/bin
+curl -fsSL https://raw.githubusercontent.com/Smarty-Pants-Inc/explorr/main/install.sh | sh
 ```
 
-⚠️ **Rebuild after every pull.** A source build never updates itself, and every push to
-`main` here auto-tags a release — so a binary built last week is behind while still being
-first on your `PATH` and reporting nothing wrong. `herdr-extensions doctor` compares the
-binary on `PATH` against the tap and warns when it has fallen behind.
+Install the bundled HerdR integration after `explorr` is on `PATH`:
 
-The binary is deliberately named `herdr-edit`, **not** `spiceedit`, so it can sit alongside an
-upstream install without either shadowing the other. If you build from source *and* install via brew,
-note that whichever of `~/.local/bin` or `/opt/homebrew/bin` comes first on your `PATH` wins — and
-herdr-extensions resolves the editor with `which`, so it follows the same order you do.
+```sh
+explorr herdr install
+explorr herdr check
+```
 
-Verified against a real install: `brew fetch` checksum passes, `make build` produces a working
-8.9 MB binary, and `make test` is green across all 14 packages.
+The integration is first-party for Smarty HerdR 0.8.0+. Before it publishes or links anything,
+`install` and `check` verify that `PATH` resolves this exact Explorr version and that HerdR supports
+workspace-right plugin panes plus local file-link handlers. Other HerdR builds can still run
+Explorr as a standalone terminal editor, but the bundled integration is not supported there.
+
+This writes the canonical manifest to `$XDG_DATA_HOME/explorr/herdr` (or
+`~/.local/share/explorr/herdr`) and links `com.smartypants.explorr` into HerdR.
+Remove it with `explorr herdr remove`.
 
 ---
 
@@ -404,7 +387,7 @@ itself — it mirrors the session through a file and drives it through another o
  ┌────────────┐                        (session state, stop location,
  │            │  Unix socket           call stack, breakpoints)
  │            │◄──────────────► delve
- │ herdr-edit │
+ │ explorr     │
  │ internal/  │  stdio
  │   dap      │◄──────────────► debugpy         Debug panel  →  debug-request.json  →  editor
  │            │                                 (start / continue / step / breakpoint toggle)
@@ -437,7 +420,7 @@ resolved path is the `.ts` file at the marked line — a stop on the compiled ou
 
 ## Configuration
 
-`~/.config/spiceedit/config.json` (or `$XDG_CONFIG_HOME/spiceedit/`):
+`~/.config/explorr/config.json` (or `$XDG_CONFIG_HOME/explorr/`):
 
 ```jsonc
 {
@@ -446,10 +429,8 @@ resolved path is the `.ts` file at the marked line — a stop on the compiled ou
 }
 ```
 
-Unknown keys are ignored, so the file is safe to grow.
-
-See [`UPSTREAM-README.md`](UPSTREAM-README.md) for custom actions (`actions.json`) and format-on-save
-(`.spiceedit/format.json`) — both inherited unchanged.
+Unknown keys are ignored, so the file is safe to grow. Format-on-save configuration lives at
+`.explorr/format.json`.
 
 ---
 
@@ -458,7 +439,7 @@ See [`UPSTREAM-README.md`](UPSTREAM-README.md) for custom actions (`actions.json
 The editor publishes what you are looking at, so companion panels can follow along:
 
 ```jsonc
-// $XDG_STATE_HOME/spiceedit/active.json   (default ~/.local/state/spiceedit/active.json)
+// $XDG_STATE_HOME/explorr/active.json   (default ~/.local/state/explorr/active.json)
 { "file": "/abs/path.ts", "line": 42, "col": 7, "root": "/abs/repo", "ts": 1785372000000 }
 ```
 
@@ -466,8 +447,7 @@ The editor publishes what you are looking at, so companion panels can follow alo
 
 This is *not* an IPC channel and nothing can talk back — it is one debounced, best-effort,
 atomically-renamed snapshot. It exists because nothing outside the process could previously know
-which file was open, and that single gap blocks *every* companion view at once: blame for this file,
-problems for this file, run the tests for this file. herdr-extensions' panels all read it.
+which file was open, and that single gap blocks companion views such as blame, problems, and tests.
 
 Design notes, since they are easy to get wrong:
 
@@ -500,7 +480,7 @@ forever.
 
 **Icons need a Nerd Font *and a terminal configured to use it*.** The editor detects fonts on disk;
 it cannot know what font your terminal renders with. A tree full of question marks is almost always
-this. `herdr-extensions doctor` diagnoses it by name.
+a terminal-font configuration problem.
 
 **A tested engine is not a shipped feature — and this fork has been caught by it twice.** `hover`
 and `definition` were complete, unit-tested and advertised in the LSP `initialize` handshake with
@@ -521,7 +501,7 @@ A green suite proves the engine is correct, not that a user can reach it.
 ## Development
 
 ```sh
-make build      # -> bin/herdr-edit
+go build -o explorr .
 make test       # go test ./... with the race detector
 make coverage   # coverage.out + an HTML report
 ```
@@ -537,8 +517,7 @@ absent, so a fresh clone stays green. Conventions (file headers, a `_test.go` be
 `tcell.NewSimulationScreen` for drawing tests) are documented in [`CLAUDE.md`](CLAUDE.md) and
 inherited from upstream — please keep to them.
 
-The Go module path stays `github.com/cloudmanic/spice-edit` on purpose: changing it would make every
-upstream merge a conflict for no benefit, since the repo and binary names are what users actually see.
+The Go module path is `github.com/Smarty-Pants-Inc/explorr`.
 
 ---
 

@@ -25,8 +25,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cloudmanic/spice-edit/internal/editor"
-	"github.com/cloudmanic/spice-edit/internal/lsp"
+	"github.com/Smarty-Pants-Inc/explorr/internal/editor"
+	"github.com/Smarty-Pants-Inc/explorr/internal/lsp"
 )
 
 // lspRequestTimeout bounds a hover or definition round trip. Generous enough for a cold gopls on a

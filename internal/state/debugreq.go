@@ -101,7 +101,7 @@ type DebugRequest struct {
 // Debug panel shells out to.
 //
 // It refuses an unknown action HERE rather than letting the editor discover it,
-// so `herdr-edit --debug contnue` is a typo the user is told about instead of a
+// so `explorr --debug contnue` is a typo the user is told about instead of a
 // key that silently does nothing.
 func WriteDebugRequest(action, file string, line int) error {
 	if !ValidDebugAction(action) {

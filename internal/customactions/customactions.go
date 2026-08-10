@@ -6,7 +6,7 @@
 // =============================================================================
 
 // customactions loads user-defined shell-out actions from
-// ~/.config/spiceedit/actions.json and exposes them to the editor's
+// ~/.config/explorr/actions.json and exposes them to the editor's
 // menu modal. The intended use case is the SSH-into-tmux workflow:
 // the editor runs on a remote box, the user clicks an action like
 // "Open on Rager", and the action shells out to scp the current file
@@ -122,19 +122,19 @@ type fileFormat struct {
 }
 
 // DefaultPath returns the canonical config-file location:
-// $XDG_CONFIG_HOME/spiceedit/actions.json, falling back to
-// ~/.config/spiceedit/actions.json when XDG_CONFIG_HOME isn't set.
+// $XDG_CONFIG_HOME/explorr/actions.json, falling back to
+// ~/.config/explorr/actions.json when XDG_CONFIG_HOME isn't set.
 // Returns "" when neither variable resolves to anything usable —
 // callers should treat that as "no custom actions configured."
 func DefaultPath() string {
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		return filepath.Join(xdg, "spiceedit", "actions.json")
+		return filepath.Join(xdg, "explorr", "actions.json")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return ""
 	}
-	return filepath.Join(home, ".config", "spiceedit", "actions.json")
+	return filepath.Join(home, ".config", "explorr", "actions.json")
 }
 
 // Load reads and parses the actions file at path. The contract:
@@ -150,13 +150,13 @@ func DefaultPath() string {
 //     than refuse the whole file.
 //   - An action whose Prompts list
 //     is malformed                → returns an error naming the
-//                                    offending action's label so the
-//                                    user can find it in the file.
-//                                    Prompts are too easy to typo and
-//                                    too dangerous to silently skip
-//                                    (a missing select option means
-//                                    the user can never submit the
-//                                    form), so this one we surface.
+//     offending action's label so the
+//     user can find it in the file.
+//     Prompts are too easy to typo and
+//     too dangerous to silently skip
+//     (a missing select option means
+//     the user can never submit the
+//     form), so this one we surface.
 func Load(path string) ([]Action, error) {
 	if path == "" {
 		return nil, nil
@@ -241,8 +241,8 @@ func validatePrompts(actionLabel string, prompts []Prompt) error {
 }
 
 // LogPath returns the canonical log location:
-// $XDG_STATE_HOME/spiceedit/actions.log, falling back to
-// ~/.local/state/spiceedit/actions.log when XDG_STATE_HOME isn't set.
+// $XDG_STATE_HOME/explorr/actions.log, falling back to
+// ~/.local/state/explorr/actions.log when XDG_STATE_HOME isn't set.
 // Returns "" when neither resolves to anything usable — callers
 // should treat that as "no logging" and quietly skip.
 //
@@ -251,13 +251,13 @@ func validatePrompts(actionLabel string, prompts []Prompt) error {
 // rules, state is for things the app produces (logs, caches, history).
 func LogPath() string {
 	if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
-		return filepath.Join(xdg, "spiceedit", "actions.log")
+		return filepath.Join(xdg, "explorr", "actions.log")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return ""
 	}
-	return filepath.Join(home, ".local", "state", "spiceedit", "actions.log")
+	return filepath.Join(home, ".local", "state", "explorr", "actions.log")
 }
 
 // RunRecord captures everything we want to log about one custom-action

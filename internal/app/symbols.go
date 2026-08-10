@@ -28,7 +28,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cloudmanic/spice-edit/internal/lsp"
+	"github.com/Smarty-Pants-Inc/explorr/internal/lsp"
 )
 
 // symbolsEvent and codeActionsEvent deliver their answers as posted events,

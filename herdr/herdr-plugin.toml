@@ -1,0 +1,41 @@
+id = "com.smartypants.explorr"
+name = "Explorr"
+version = "1.0.0"
+min_herdr_version = "0.8.0"
+description = "Workspace file explorer and editor for HerdR"
+platforms = ["macos"]
+
+[[actions]]
+id = "open-file"
+title = "Open file in Explorr"
+description = "Open a clicked local file link in a same-workspace Explorr tab"
+command = [
+  "sh",
+  "-c",
+  '''exec explorr --herdr-open "$HERDR_PLUGIN_CLICKED_URL"''',
+]
+
+[[link_handlers]]
+id = "local-file"
+title = "Open local file"
+pattern = "^file://"
+action = "open-file"
+
+[[panes]]
+id = "explorer"
+title = "explorer"
+description = "Browse the active workspace and open files in Explorr tabs"
+placement = "workspace_right"
+width = 26
+command = ["explorr", "--explorer"]
+
+[[startup]]
+command = [
+  "sh",
+  "-c",
+  '''"$HERDR_BIN_PATH" api snapshot | jq -r '.result.snapshot as $s | $s.workspaces[] as $w | $s.layouts[] | select(.workspace_id == $w.workspace_id and .tab_id == $w.active_tab_id) | .focused_pane_id as $pane_id | $s.panes[] | select(.pane_id == $pane_id) | [$w.workspace_id, (.cwd // $w.worktree.checkout_path // ".")] | @tsv' | while IFS="$(printf '\t')" read -r workspace cwd; do "$HERDR_BIN_PATH" plugin pane open --plugin "$HERDR_PLUGIN_ID" --entrypoint explorer --workspace "$workspace" --cwd "$cwd" --no-focus >/dev/null; done''',
+]
+
+[[events]]
+on = "workspace.created"
+command = ["sh", "-c", 'cwd="$(printf %s "$HERDR_PLUGIN_CONTEXT_JSON" | jq -r ".focused_pane_cwd // .workspace_cwd")"; "$HERDR_BIN_PATH" plugin pane open --plugin "$HERDR_PLUGIN_ID" --entrypoint explorer --workspace "$HERDR_WORKSPACE_ID" --cwd "$cwd" --no-focus >/dev/null']

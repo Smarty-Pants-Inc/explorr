@@ -29,8 +29,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/cloudmanic/spice-edit/internal/editor"
-	"github.com/cloudmanic/spice-edit/internal/lsp"
+	"github.com/Smarty-Pants-Inc/explorr/internal/editor"
+	"github.com/Smarty-Pants-Inc/explorr/internal/lsp"
 )
 
 // problemRef is one navigable diagnostic: a path, a zero-based line, a

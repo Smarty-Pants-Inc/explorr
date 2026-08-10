@@ -29,4 +29,4 @@ spell the read `_, bg, _ := style.Decompose()` and prefer
 `existing.Background(c)` (which mutates only the background) over rebuilding a
 style from `StyleDefault`. Assert the colour by scanning a rendered
 `SimulationScreen` — the mistake is invisible to the compiler and to `go vet`,
-so only a pixel read catches it. Related: [[herdr-edit-constructor-guards-untestable]].
+so only a pixel read catches it. Related: [[explorr-constructor-guards-untestable]].

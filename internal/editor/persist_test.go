@@ -116,7 +116,7 @@ func TestPersistUndo_CorruptHistoryFileDegradesGracefully(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	undoDir := filepath.Join(stateHome, "spiceedit", "undo")
+	undoDir := filepath.Join(stateHome, "explorr", "undo")
 	if err := os.MkdirAll(undoDir, 0700); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestPersistUndo_VersionMismatchIgnored(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	undoDir := filepath.Join(stateHome, "spiceedit", "undo")
+	undoDir := filepath.Join(stateHome, "explorr", "undo")
 	if err := os.MkdirAll(undoDir, 0700); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestPersistUndo_NeverSavedFileIsNoOp(t *testing.T) {
 	if err := tab.PersistUndo(); err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
-	undoDir := filepath.Join(stateHome, "spiceedit", "undo")
+	undoDir := filepath.Join(stateHome, "explorr", "undo")
 	entries, _ := os.ReadDir(undoDir)
 	if len(entries) != 0 {
 		t.Fatalf("expected no history file to be written, found %d", len(entries))
@@ -284,7 +284,7 @@ func TestPersistUndoDir_UsesXDGStateHomeWhenSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("persistUndoDir: %v", err)
 	}
-	want := filepath.Join(custom, "spiceedit", "undo")
+	want := filepath.Join(custom, "explorr", "undo")
 	if dir != want {
 		t.Fatalf("got %q, want %q", dir, want)
 	}
@@ -301,7 +301,7 @@ func TestPersistUndoDir_FallsBackToLocalState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("persistUndoDir: %v", err)
 	}
-	want := filepath.Join(home, ".local", "state", "spiceedit", "undo")
+	want := filepath.Join(home, ".local", "state", "explorr", "undo")
 	if dir != want {
 		t.Fatalf("got %q, want %q", dir, want)
 	}

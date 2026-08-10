@@ -42,7 +42,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/cloudmanic/spice-edit/internal/dap"
+	"github.com/Smarty-Pants-Inc/explorr/internal/dap"
 )
 
 // noSourceExit is the exit code for "there is no VS Code here to read".

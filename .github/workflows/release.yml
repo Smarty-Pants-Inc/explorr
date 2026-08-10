@@ -5,39 +5,28 @@
 # Copyright: 2026 Cloudmanic, LLC. All rights reserved.
 # =============================================================================
 #
-# Release pipeline for SpiceEdit. Triggers on every push to main:
+# Release pipeline for Explorr. Manual-only during the rename milestone:
 #
-#   1. Determines the next version. If the pushed commit hand-edited
-#      internal/version/version.go (you bumped major/minor manually), the
-#      workflow uses that version as-is. Otherwise it auto-bumps the patch
-#      number, commits the change back to main with [skip ci], and pushes.
+#   1. Checks that the binary and bundled HerdR plugin versions agree. If the
+#      dispatched commit hand-edited both versions (you bumped major/minor
+#      manually), the workflow uses that version as-is. Otherwise it auto-bumps
+#      the patch number in both files, commits the change to main with [skip ci],
+#      and pushes.
 #   2. Tags v<x.y.z> and pushes the tag.
-#   3. Runs goreleaser to cross-compile binaries (linux/darwin/windows ×
-#      amd64/arm64), package them, attach them to a GitHub Release, and
-#      push an updated Homebrew formula into Formula/ in this same repo
-#      (using the default GITHUB_TOKEN — no separate tap repo or PAT
-#      required).
+#   3. Runs GoReleaser to cross-compile binaries (linux/darwin/windows ×
+#      amd64/arm64), package them, and attach them to a GitHub Release.
+#   4. Renders and commits the same-repo Homebrew formula from the checksums.
 
 name: Release
 
 on:
-  push:
-    branches: [main]
-  # Manual escape hatch. If a merge commit accidentally carries a
-  # skip-CI marker (or anything else suppresses the auto-trigger),
-  # we can rerun the release flow against the current main without
-  # needing an empty no-op commit. Bumps, tags, and dispatches Pages
-  # exactly the same as a normal push trigger.
+  # Deliberate manual cutover: do not release on ordinary pushes.
   workflow_dispatch:
 
-# Pushes back to main need write access to the repo's contents. The
-# `actions: write` scope lets the final step kick off the Pages
-# workflow via workflow_dispatch — the version-bump commit carries
-# [skip ci] so the auto-deploy on internal/version/version.go won't
-# fire on its own.
+# A manual release writes version, tags, and the same-repo formula, so it
+# needs repository contents write access.
 permissions:
   contents: write
-  actions: write
 
 # Serialise releases — no two version-bumps racing each other.
 concurrency:
@@ -68,16 +57,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          CURRENT=$(sed -nE 's/.*const Version = "([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' internal/version/version.go)
-          if [[ -z "$CURRENT" ]]; then
-            echo "Could not parse version from internal/version/version.go" >&2
-            exit 1
-          fi
+          CURRENT=$(python3 scripts/set-release-version.py --check)
 
-          # If the pushed commit changed version.go, treat that as a
-          # manual major/minor bump and use the value as-is. Otherwise
+          # If the pushed commit changed either synchronized version file, treat
+          # that as a manual major/minor bump and use the value as-is. Otherwise
           # auto-bump the patch.
-          if git diff --name-only HEAD~1..HEAD 2>/dev/null | grep -qx 'internal/version/version.go'; then
+          if git diff --name-only HEAD~1..HEAD 2>/dev/null | grep -Eq '^(internal/version/version.go|herdr/herdr-plugin.toml)$'; then
             echo "Version was manually edited to $CURRENT — using as-is."
             echo "version=$CURRENT"  >> "$GITHUB_OUTPUT"
             echo "bumped=false"      >> "$GITHUB_OUTPUT"
@@ -91,7 +76,7 @@ jobs:
             echo "bumped=true"  >> "$GITHUB_OUTPUT"
           fi
 
-      # Commit the bumped version.go back to main. The [skip ci] marker
+      # Commit the synchronized binary and plugin versions back to main. The [skip ci] marker
       # in the commit message tells GitHub Actions not to re-run this
       # workflow (which would loop forever).
       # Git identity, set once for EVERY step that writes a git object. This used
@@ -116,9 +101,9 @@ jobs:
           set -euo pipefail
           NEW="${{ steps.version.outputs.version }}"
 
-          sed -i -E "s/(const Version = )\"[0-9]+\.[0-9]+\.[0-9]+\"/\1\"$NEW\"/" internal/version/version.go
+          python3 scripts/set-release-version.py "$NEW"
 
-          git add internal/version/version.go
+          git add internal/version/version.go herdr/herdr-plugin.toml
           git commit -m "Release v$NEW [skip ci]"
           git push origin HEAD:main
 
@@ -138,12 +123,23 @@ jobs:
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
-          version: latest
+          version: "~> v2"
           args: release --clean
         env:
-          # Same-repo brew formula push uses the default workflow token —
-          # no separate tap repo or PAT needed.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update Homebrew formula
+        run: |
+          set -euo pipefail
+          NEW="${{ steps.version.outputs.version }}"
+          python3 scripts/render-homebrew-formula.py "$NEW" dist/checksums.txt Formula/explorr.rb
+          git add Formula/explorr.rb
+          if git diff --cached --quiet; then
+            echo "Homebrew formula is already current."
+            exit 0
+          fi
+          git commit -m "Update explorr brew formula to v$NEW [skip ci]"
+          git push origin HEAD:main
 
       # NO Pages dispatch here. Upstream spice-edit deploys a marketing site from
       # a pages.yml workflow and this step was inherited with the rest of the
@@ -152,8 +148,8 @@ jobs:
       # took the whole job down with it. Every release from v0.1.2 to v0.1.6 is
       # marked FAILED for that reason alone, while having already tagged, built
       # all five platforms, published the GitHub Release and written the brew
-      # formula. Same shape as the brews.repository bug above: inherited upstream
-      # config pointing at infrastructure this fork does not have.
+      # formula. Same shape as the old upstream-owned release-coordinate bug:
+      # inherited config pointing at infrastructure this fork does not have.
       #
       # A red release that actually shipped is worse than either outcome alone --
       # it trains you to ignore the signal, so a genuine GoReleaser failure would

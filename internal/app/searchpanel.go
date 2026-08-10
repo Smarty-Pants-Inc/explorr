@@ -45,7 +45,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cloudmanic/spice-edit/internal/search"
+	"github.com/Smarty-Pants-Inc/explorr/internal/search"
 )
 
 // searchResultsEvent delivers a completed workspace scan onto the tcell

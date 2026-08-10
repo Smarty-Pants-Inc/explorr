@@ -39,7 +39,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/cloudmanic/spice-edit/internal/lsp"
+	"github.com/Smarty-Pants-Inc/explorr/internal/lsp"
 )
 
 //go:generate go run ./gen -out data.go

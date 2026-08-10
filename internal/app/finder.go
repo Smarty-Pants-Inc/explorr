@@ -20,7 +20,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/cloudmanic/spice-edit/internal/finder"
+	"github.com/Smarty-Pants-Inc/explorr/internal/finder"
 	"github.com/gdamore/tcell/v2"
 )
 

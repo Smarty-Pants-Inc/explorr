@@ -25,7 +25,7 @@ package app
 import (
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/cloudmanic/spice-edit/internal/finder"
+	"github.com/Smarty-Pants-Inc/explorr/internal/finder"
 )
 
 const (

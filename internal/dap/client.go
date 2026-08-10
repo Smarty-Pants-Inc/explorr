@@ -705,8 +705,8 @@ func (c *Client) Initialize(ctx context.Context, adapterID string) (Capabilities
 // kept next to Initialize so the two cannot drift.
 func initializeArgsForClient(adapterID string) initializeArgs {
 	return initializeArgs{
-		ClientID:        "herdr-edit",
-		ClientName:      "herdr-edit",
+		ClientID:        "explorr",
+		ClientName:      "explorr",
 		AdapterID:       adapterID,
 		Locale:          "en-us",
 		LinesStartAt1:   true,
@@ -1304,7 +1304,7 @@ func (c *Client) handleReverseRequest(rr ReverseRequest) {
 		c.handleStartDebugging(rr)
 		return
 	}
-	c.answerReverseRequest(rr, false, "herdr-edit does not implement the "+rr.Command+" request")
+	c.answerReverseRequest(rr, false, "explorr does not implement the "+rr.Command+" request")
 	c.log("declined the adapter's " + rr.Command + " request")
 }
 
@@ -1342,7 +1342,7 @@ func (c *Client) handleStartDebugging(rr ReverseRequest) {
 
 	if !first {
 		c.answerReverseRequest(rr, false,
-			"herdr-edit debugs one session at a time; this child session was declined")
+			"explorr debugs one session at a time; this child session was declined")
 		c.log("declined a second debug session (" + describeChild(cs) + ") — " +
 			"only one is debugged at a time, and the first one is still active")
 		return

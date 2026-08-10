@@ -5,23 +5,22 @@
 # Copyright: 2026 Cloudmanic, LLC. All rights reserved.
 # =============================================================================
 #
-# GoReleaser config for SpiceEdit. Driven by .github/workflows/release.yml on
-# every push to main: that workflow bumps internal/version/version.go and
-# tags v<x.y.z>, then invokes `goreleaser release --clean`. Goreleaser then
-# cross-compiles the binary, archives it, attaches it to a GitHub Release,
-# and (when the homebrew tap secret is set) updates the Homebrew formula.
+# GoReleaser config for Explorr. `.github/workflows/release.yml` runs it only
+# when manually dispatched: it tags v<x.y.z>, cross-compiles the binary,
+# packages it, and attaches it to a GitHub Release. The workflow renders the
+# same-repo Homebrew formula from GoReleaser's checksums afterward.
 
 version: 2
 
-project_name: herdr-edit
+project_name: explorr
 
 before:
   hooks:
     - go mod tidy
 
 builds:
-  - id: herdr-edit
-    binary: herdr-edit
+  - id: explorr
+    binary: explorr
     main: .
     env:
       - CGO_ENABLED=0
@@ -45,7 +44,9 @@ archives:
     files:
       - LICENSE*
       - README*
+      - NOTICE
 
+      - herdr/**
 checksum:
   name_template: "checksums.txt"
 
@@ -54,10 +55,8 @@ changelog:
   use: github
   filters:
     exclude:
-      # The release job's OWN commits. Without this, every release's notes are dominated by
-      # "Release vX.Y.Z [skip ci]" and "Update herdr-edit brew formula to vX.Y.Z [skip ci]" --
-      # v0.5.5 shipped with two of its three changelog lines written by the bot. Release notes are
-      # the shop window on a public repo; they should not be mostly bookkeeping.
+      # The release job's own commits. Without this, release notes are dominated
+      # by version bumps and same-repo Homebrew formula updates.
       - "\\[skip ci\\]"
       # Conventional-commit prefixes. Kept for anyone who uses them, but note this repo writes prose
       # subjects ("Warn that a source build goes stale…"), so these match nothing here -- they are not
@@ -67,40 +66,3 @@ changelog:
       - "^test:"
       - "Merge pull request"
       - "Merge branch"
-
-# Homebrew formula committed straight back into this repo under Formula/.
-# Users install via:
-#
-#   brew tap cloudmanic/spice-edit https://github.com/cloudmanic/spice-edit
-#   brew install cloudmanic/spice-edit/spice-edit
-#
-# Because the formula lives in the same repo as the source, the default
-# GITHUB_TOKEN the workflow already holds is enough to push it — no PAT,
-# no separate tap repo. The [skip ci] marker on the formula-update commit
-# stops the new push from triggering a second release run.
-brews:
-  - name: herdr-edit
-    repository:
-      # MUST be this fork, not upstream. Inherited from cloudmanic/spice-edit, this pointed at
-      # THEIR repo, so the first release here tried to commit a formula into someone else's
-      # project. GitHub refused it with a 403, which is the only reason it was harmless.
-      owner: vonzelle-vzt
-      name: herdr-edit
-      branch: main
-      token: "{{ .Env.GITHUB_TOKEN }}"
-    directory: Formula
-    commit_msg_template: "Update {{ .ProjectName }} brew formula to {{ .Tag }} [skip ci]"
-    homepage: "https://github.com/vonzelle-vzt/herdr-edit"
-    # `brew audit --strict` rejects three things at once here, and this string is the source of
-    # truth because GoReleaser regenerates Formula/herdr-edit.rb on every release -- editing the
-    # formula directly would be undone by the next tag. Audit requires: starts with a capital,
-    # does not start with the formula name, and does not end with a full stop.
-    description: "Mouse-first terminal code editor with LSP diagnostics, for herdr"
-    license: "MIT"
-    commit_author:
-      name: github-actions[bot]
-      email: 41898282+github-actions[bot]@users.noreply.github.com
-    install: |
-      bin.install "herdr-edit"
-    test: |
-      assert_path_exists bin/"herdr-edit"

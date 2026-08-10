@@ -5,13 +5,13 @@
 # Copyright: 2026 Cloudmanic, LLC. All rights reserved.
 # =============================================================================
 
-BINARY := herdr-edit
+BINARY := explorr
 
 .PHONY: run build install build-linux test test-short coverage tidy clean help
 
 # help is the default target so `make` with no args prints what's available.
 help:
-	@echo "herdr-edit — opinionated mouse-first terminal code editor"
+	@echo "Explorr — opinionated mouse-first terminal code editor"
 	@echo ""
 	@echo "Editor targets:"
 	@echo "  make run          Run the editor in the current directory."
@@ -34,7 +34,7 @@ build:
 	mkdir -p bin
 	go build -o bin/$(BINARY) .
 
-# install copies the binary into /usr/local/bin so you can launch it as `spiceedit`.
+# install copies the binary into /usr/local/bin so you can launch it as `explorr`.
 install: build
 	install -m 0755 bin/$(BINARY) /usr/local/bin/$(BINARY)
 

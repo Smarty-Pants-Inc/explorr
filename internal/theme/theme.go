@@ -82,7 +82,7 @@ type Theme struct {
 	SynConstant tcell.Color
 }
 
-// Default mirrors OMP's titanium-paul palette. herdr-edit intentionally keeps
+// Default mirrors OMP's titanium-paul palette. Explorr intentionally keeps
 // its single compile-time theme in the fork rather than loading runtime files.
 func Default() Theme {
 	return Theme{

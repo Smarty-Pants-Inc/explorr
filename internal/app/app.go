@@ -26,18 +26,18 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cloudmanic/spice-edit/internal/clipboard"
-	"github.com/cloudmanic/spice-edit/internal/customactions"
-	"github.com/cloudmanic/spice-edit/internal/dap"
-	"github.com/cloudmanic/spice-edit/internal/editor"
-	"github.com/cloudmanic/spice-edit/internal/filetree"
-	"github.com/cloudmanic/spice-edit/internal/finder"
-	"github.com/cloudmanic/spice-edit/internal/icons"
-	"github.com/cloudmanic/spice-edit/internal/lsp"
-	"github.com/cloudmanic/spice-edit/internal/spiceconfig"
-	"github.com/cloudmanic/spice-edit/internal/state"
-	"github.com/cloudmanic/spice-edit/internal/theme"
-	"github.com/cloudmanic/spice-edit/internal/version"
+	"github.com/Smarty-Pants-Inc/explorr/internal/clipboard"
+	"github.com/Smarty-Pants-Inc/explorr/internal/config"
+	"github.com/Smarty-Pants-Inc/explorr/internal/customactions"
+	"github.com/Smarty-Pants-Inc/explorr/internal/dap"
+	"github.com/Smarty-Pants-Inc/explorr/internal/editor"
+	"github.com/Smarty-Pants-Inc/explorr/internal/filetree"
+	"github.com/Smarty-Pants-Inc/explorr/internal/finder"
+	"github.com/Smarty-Pants-Inc/explorr/internal/icons"
+	"github.com/Smarty-Pants-Inc/explorr/internal/lsp"
+	"github.com/Smarty-Pants-Inc/explorr/internal/state"
+	"github.com/Smarty-Pants-Inc/explorr/internal/theme"
+	"github.com/Smarty-Pants-Inc/explorr/internal/version"
 )
 
 // Layout, behavior, and feel constants. Constants instead of config —
@@ -217,7 +217,7 @@ type menuItemDef struct {
 
 // builtinMenuGroups returns the editor's built-in action groups in
 // display order. Custom actions loaded from
-// ~/.config/spiceedit/actions.json get prepended as their own group
+// ~/.config/explorr/actions.json get prepended as their own group
 // in menuLayout — they're not included here so toggling them on or
 // off doesn't require touching this table.
 //
@@ -336,7 +336,7 @@ func (a *App) menuLayout() (items []menuItemDef, dividers []int, modalHeight int
 			i := i // capture
 			// Custom actions are user-defined shell — we don't try to
 			// guess from the command string whether it needs $FILE.
-			// "Upgrade SpiceEdit" obviously doesn't; "Open on
+			// "Upgrade Explorr" obviously doesn't; "Open on
 			// computer" obviously does. Both should be runnable from
 			// the menu; if a $FILE-dependent command is invoked with
 			// no tab open it'll fail with a real error and our info
@@ -578,7 +578,7 @@ type App struct {
 	gitBranch string
 
 	// customActions is the list of user-configured shell-out actions
-	// loaded from ~/.config/spiceedit/actions.json at startup. When
+	// loaded from ~/.config/explorr/actions.json at startup. When
 	// non-empty they prepend a new group to the action menu — see
 	// menuLayout. nil / empty when the user hasn't configured any.
 	customActions []customactions.Action
@@ -744,7 +744,7 @@ func New(rootDir string) (*App, error) {
 	}
 	a.breakpoints = loadPersistedBreakpoints(a.rootDir)
 	a.setActiveFolder(tree.Root.Path)
-	a.loadSpiceConfig()
+	a.loadConfig()
 	a.refreshGitStatus()
 	a.loadCustomActions()
 	a.flash("Welcome — click a file to open · click  ≡  for the menu")
@@ -762,7 +762,7 @@ func New(rootDir string) (*App, error) {
 	return a, nil
 }
 
-// NewSingleFile is the lean alternative to New for the "spiceedit
+// NewSingleFile is the lean alternative to New for the "explorr
 // somefile.md" invocation: no file tree, no project finder index,
 // no background tree-refresh goroutine, sidebar hidden.
 func NewSingleFile(filePath string) (*App, error) {
@@ -798,7 +798,7 @@ func NewSingleFileAt(filePath string, line, col int) (*App, error) {
 	}
 	a.breakpoints = loadPersistedBreakpoints(a.rootDir)
 	a.setActiveFolder(rootDir)
-	a.loadSpiceConfig()
+	a.loadConfig()
 	a.loadCustomActions()
 	// openFile loads the file's git gutter markers itself (a file-scoped
 	// `git diff`), so single-file mode shows change bars on open without
@@ -831,14 +831,14 @@ func (a *App) loadCustomActions() {
 	a.customActions = actions
 }
 
-// loadSpiceConfig reads ~/.config/spiceedit/config.json (if any),
+// loadConfig reads ~/.config/explorr/config.json (if any),
 // resolves the Nerd Fonts auto/on/off mode to a concrete bool via
 // icons.Resolve, and stamps the result onto the file tree so the
 // next render starts drawing glyphs (or doesn't). A malformed
 // config flashes a status message but never blocks startup — the
 // editor falls back to Defaults() and keeps going.
-func (a *App) loadSpiceConfig() {
-	cfg, err := spiceconfig.Load(spiceconfig.DefaultPath())
+func (a *App) loadConfig() {
+	cfg, err := config.Load(config.DefaultPath())
 	if err != nil {
 		a.flash("config: " + err.Error())
 	}
@@ -2319,7 +2319,7 @@ func (a *App) flash(msg string) {
 
 // OpenFile opens the file at path in a new tab — or switches to it if
 // it is already open. Exported so main.go can seed the editor with the
-// file the user named on the command line ("spiceedit foo.go"). Thin
+// file the user named on the command line ("explorr foo.go"). Thin
 // wrapper around openFile so internal callers keep using the lowercase
 // name and the public surface stays small.
 func (a *App) OpenFile(path string) { a.openFile(path) }
@@ -3095,7 +3095,7 @@ func (a *App) draw() {
 
 // iconsOn reports whether Nerd Font glyphs should render in places
 // outside the file tree (e.g. the tab bar). The single source of
-// truth is the file tree — App.loadSpiceConfig stamped the resolved
+// truth is the file tree — App.loadConfig stamped the resolved
 // auto/on/off decision onto t.IconsEnabled there, so consulting the
 // tree keeps tabs and tree perfectly in sync (turning icons off via
 // config.json hides them everywhere at once).

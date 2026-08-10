@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cloudmanic/spice-edit/internal/toolpath"
+	"github.com/Smarty-Pants-Inc/explorr/internal/toolpath"
 )
 
 // Adapter describes how to launch one debug adapter and what to ask it for.

@@ -24,7 +24,7 @@ import (
 // wrong — Content-Length framing, the pipe plumbing, and the handshake — and
 // those are the parts that decide whether any of this works against tsserver.
 
-const helperEnv = "SPICEEDIT_LSP_FAKE_SERVER"
+const helperEnv = "EXPLORR_LSP_FAKE_SERVER"
 
 // fakeServerArgv re-runs this test binary in helper mode.
 func fakeServerArgv(mode string) []string {

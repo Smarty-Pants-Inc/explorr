@@ -10,8 +10,8 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/cloudmanic/spice-edit/internal/filetree"
-	"github.com/cloudmanic/spice-edit/internal/theme"
+	"github.com/Smarty-Pants-Inc/explorr/internal/filetree"
+	"github.com/Smarty-Pants-Inc/explorr/internal/theme"
 )
 
 // NewExplorer builds the workspace-right HerdR file tree. It deliberately
@@ -44,7 +44,7 @@ func NewExplorer(rootDir string) (*App, error) {
 		sidebarWidth:   defaultSidebarWidth,
 	}
 	a.setActiveFolder(tree.Root.Path)
-	a.loadSpiceConfig()
+	a.loadConfig()
 	a.refreshGitStatus()
 	a.tree.Focus(tree.Root.Path, 0)
 	a.startTreeRefresh()

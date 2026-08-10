@@ -5,13 +5,12 @@
 # Copyright: 2026 Cloudmanic, LLC. All rights reserved.
 # =============================================================================
 #
-# Test pipeline for SpiceEdit. Runs `go test ./...` with the race detector
+# Test pipeline for Explorr. Runs `go test ./...` with the race detector
 # on every push and every pull request, on Linux + macOS so we catch
-# platform-specific flakes before they ship. The release workflow
-# (release.yml) doesn't depend on this — it triggers separately on push
-# to main — but a red test job is meant to block merges via the PR's
-# required-checks setting (configure that on GitHub once the first run
-# is green).
+# platform-specific flakes before they ship. Release remains manual-only
+# during the rename milestone; a red test job is meant to block merges via
+# the PR's required-checks setting (configure that on GitHub once the first
+# run is green).
 
 name: Test
 
@@ -58,6 +57,14 @@ jobs:
 
       - name: Vet
         run: go vet ./...
+
+      - name: Verify synchronized release versions
+        run: |
+          python3 scripts/set-release-version.py --self-test
+          python3 scripts/set-release-version.py --check
+
+      - name: Verify Homebrew formula renderer
+        run: python3 scripts/render-homebrew-formula.py --self-test
 
       # internal/lsp/live_gopls_test.go drives all eight LSP requests against a REAL gopls and
       # t.Skip()s when it is absent. That skip is the whole problem: the file exists because this

@@ -6,13 +6,12 @@
 -->
 
 > [!NOTE]
-> **This is upstream's README, kept for reference.** It describes
+> **This is cloudmanic/spice-edit's README, kept unchanged for reference.** It describes
 > [cloudmanic/spice-edit](https://github.com/cloudmanic/spice-edit) and its `spiceedit` binary.
-> For this fork — including LSP diagnostics, the gitignore-aware tree, find and replace, and the
-> `herdr-edit` binary — see [README.md](README.md).
+> Explorr derives from `vonzelle-vzt/herdr-edit`, which itself derives from this upstream; for
+> Explorr, its `explorr` binary, and current installation guidance, see [README.md](README.md).
 >
-> Sections still accurate for the fork: custom actions, format-on-save, the mouse/menu model,
-> and the general project layout.
+> The remainder is historical upstream documentation, not Explorr product guidance.
 
 # SpiceEdit
 

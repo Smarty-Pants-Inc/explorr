@@ -34,7 +34,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/cloudmanic/spice-edit/internal/editor"
+	"github.com/Smarty-Pants-Inc/explorr/internal/editor"
 )
 
 const (

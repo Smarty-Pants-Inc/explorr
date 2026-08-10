@@ -49,8 +49,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cloudmanic/spice-edit/internal/dap"
-	"github.com/cloudmanic/spice-edit/internal/editor"
+	"github.com/Smarty-Pants-Inc/explorr/internal/dap"
+	"github.com/Smarty-Pants-Inc/explorr/internal/editor"
 )
 
 // maxDebugVariables caps how many variables are read from one reference.

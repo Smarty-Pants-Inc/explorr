@@ -10,11 +10,11 @@
 // internal/editor/marks.go tracks a Tab's breakpoints in memory and keeps
 // them pinned to the right line as the buffer edits; that history dies with
 // the process. This file mirrors it to Dir()/breakpoints.json so closing and
-// reopening herdr-edit on the same project doesn't lose every mark you set.
+// reopening Explorr on the same project doesn't lose every mark you set.
 //
 // The file holds every project's breakpoints, keyed by root, because a
 // single well-known path is the only address companion tooling and a second
-// herdr-edit instance can agree on without a socket. Writing is a full
+// Explorr instance can agree on without a socket. Writing is a full
 // read-merge-write of the file rather than one entry: two editors open on
 // different roots must not clobber each other's breakpoints, and the write
 // volume here (a handful of toggles per session) makes the extra read cheap

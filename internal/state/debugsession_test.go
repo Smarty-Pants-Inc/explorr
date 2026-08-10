@@ -80,7 +80,7 @@ func TestDebugSessionSurvivesAnUnwritableDirectory(t *testing.T) {
 	// A regular FILE where the state directory belongs: MkdirAll then fails for
 	// every write, on every platform, without needing a permission trick that
 	// root would defeat.
-	if err := os.WriteFile(filepath.Join(root, "spiceedit"), []byte("not a directory"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "explorr"), []byte("not a directory"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	p.Set(DebugSession{State: DebugStateStopped, File: "/a/b.go", Line: 4})

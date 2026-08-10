@@ -1,9 +1,9 @@
 NOTICE
 ======
 
-herdr-edit is distributed under the MIT License; see LICENSE.
+Explorr is distributed under the MIT License; see LICENSE.
 
-This file records third-party material included in herdr-edit and the
+This file records third-party material included in Explorr and the
 attribution its licence requires to be preserved.
 
 There are two entries, and they are different KINDS of thing. The first is data
@@ -101,10 +101,10 @@ Microsoft Corporation — vscode-js-debug (the JavaScript/Node debug adapter)
 
 What is used, and what is NOT shipped
 -------------------------------------
-herdr-edit can debug JavaScript and Node programs by RUNNING a js-debug debug
+Explorr can debug JavaScript and Node programs by RUNNING a js-debug debug
 adapter that the USER has installed. No part of vscode-js-debug is copied,
 vendored, bundled, linked or redistributed by this project. Nothing from it
-appears in the herdr-edit binary, the release archives or the brew formula.
+appears in the Explorr binary, the release archives or the brew formula.
 
 This is a different relationship from the entry above, and the distinction is
 the point of listing it separately:
@@ -113,7 +113,7 @@ the point of listing it separately:
     so MIT's notice-preservation requirement applies to our source tree;
 
   * js-debug is a separate program invoked over a socket, exactly as `dlv` and
-    `debugpy` are. herdr-edit contains the knowledge of how to LAUNCH and SPEAK
+    `debugpy` are. Explorr contains the knowledge of how to LAUNCH and SPEAK
     to it — a file path, an argv, and the Debug Adapter Protocol — and none of
     its code.
 
