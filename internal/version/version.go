@@ -12,4 +12,4 @@ package version
 
 // Version is the Explorr release version, displayed in the menu footer.
 // Bump this constant on each release (or let release automation do it).
-const Version = "1.0.1"
+const Version = "1.0.2"
