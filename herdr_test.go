@@ -101,6 +101,22 @@ esac
 	}
 
 	writeExplorrVersion(version.Version)
+	t.Setenv("PATH", binDir)
+	if _, err := runHerdRPluginCommand("install"); err == nil || !strings.Contains(err.Error(), "jq is not on PATH") {
+		t.Fatalf("missing jq preflight returned %v", err)
+	}
+	if _, err := os.Stat(manifest); !os.IsNotExist(err) {
+		t.Fatalf("missing jq published manifest: %v", err)
+	}
+	if _, err := os.Stat(state); !os.IsNotExist(err) {
+		t.Fatalf("missing jq linked plugin: %v", err)
+	}
+	jq := filepath.Join(binDir, "jq")
+	if err := os.WriteFile(jq, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+originalPath)
+
 	t.Setenv("EXPLORR_TEST_HERDR_CAPABILITIES", "missing")
 	if _, err := runHerdRPluginCommand("install"); err == nil || !strings.Contains(err.Error(), "workspace-right") {
 		t.Fatalf("missing capability preflight returned %v", err)
@@ -137,6 +153,18 @@ esac
 	if _, err := runHerdRPluginCommand("check"); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Remove(jq); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	if _, err := runHerdRPluginCommand("check"); err == nil || !strings.Contains(err.Error(), "jq is not on PATH") {
+		t.Fatalf("check accepted missing jq: %v", err)
+	}
+	if err := os.WriteFile(jq, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+originalPath)
+
 	if err := os.WriteFile(manifest, []byte("stale"), 0o644); err != nil {
 		t.Fatal(err)
 	}

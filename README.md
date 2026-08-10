@@ -303,7 +303,9 @@ original headers, and files new here carry ours.
 
 ## Install
 
-Explorr has no published release yet. After the first manually cut release, install it with:
+The latest release is available from [GitHub Releases](https://github.com/Smarty-Pants-Inc/explorr/releases/latest).
+
+### Homebrew on macOS or Linux
 
 ```sh
 brew tap Smarty-Pants-Inc/explorr https://github.com/Smarty-Pants-Inc/explorr
@@ -311,7 +313,13 @@ brew install Smarty-Pants-Inc/explorr/explorr
 explorr --version
 ```
 
-Until then, build from source with Go 1.24+ and no CGO:
+### Installer on macOS or Linux
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Smarty-Pants-Inc/explorr/main/install.sh | sh
+```
+
+### Build from source
 
 ```sh
 git clone https://github.com/Smarty-Pants-Inc/explorr
@@ -320,23 +328,19 @@ go build -o explorr .
 ./explorr --version
 ```
 
-The one-line installer will likewise be available after that release:
+### Smarty HerdR integration
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/Smarty-Pants-Inc/explorr/main/install.sh | sh
-```
-
-Install the bundled HerdR integration after `explorr` is on `PATH`:
+The bundled integration requires `explorr` and `jq` on `PATH` plus Smarty HerdR 0.8.0 or newer:
 
 ```sh
 explorr herdr install
 explorr herdr check
 ```
 
-The integration is first-party for Smarty HerdR 0.8.0+. Before it publishes or links anything,
-`install` and `check` verify that `PATH` resolves this exact Explorr version and that HerdR supports
-workspace-right plugin panes plus local file-link handlers. Other HerdR builds can still run
-Explorr as a standalone terminal editor, but the bundled integration is not supported there.
+Before it publishes or links anything, `install` verifies this exact Explorr version, `jq`, and
+HerdR support for workspace-right plugin panes plus local file-link handlers. `check` repeats those
+preflights before reporting the installed plugin ready. Other HerdR builds can still run Explorr as
+a standalone terminal editor, but the bundled integration is not supported there.
 
 This writes the canonical manifest to `$XDG_DATA_HOME/explorr/herdr` (or
 `~/.local/share/explorr/herdr`) and links `com.smartypants.explorr` into HerdR.

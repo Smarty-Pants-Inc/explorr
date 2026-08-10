@@ -301,3 +301,30 @@ func TestHelpNamesEveryDebugAction(t *testing.T) {
 		}
 	}
 }
+
+func TestREADMEReflectsPublishedRelease(t *testing.T) {
+	readme, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lower := strings.ToLower(string(readme))
+	for _, stale := range []string{
+		"no published release yet",
+		"until then, build from source",
+		"installer will likewise be available",
+	} {
+		if strings.Contains(lower, stale) {
+			t.Errorf("released README retains pre-release wording %q", stale)
+		}
+	}
+	for _, required := range []string{
+		"https://github.com/Smarty-Pants-Inc/explorr/releases/latest",
+		"brew install Smarty-Pants-Inc/explorr/explorr",
+		"curl -fsSL https://raw.githubusercontent.com/Smarty-Pants-Inc/explorr/main/install.sh | sh",
+		"requires `explorr` and `jq` on `PATH`",
+	} {
+		if !strings.Contains(string(readme), required) {
+			t.Errorf("released README is missing %q", required)
+		}
+	}
+}

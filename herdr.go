@@ -92,6 +92,12 @@ func checkExplorrOnPath() error {
 	}
 	return nil
 }
+func checkJQOnPath() error {
+	if _, err := exec.LookPath("jq"); err != nil {
+		return errors.New("jq is not on PATH; install jq before linking Explorr's HerdR plugin")
+	}
+	return nil
+}
 
 func isolatedHerdREnvironment(root string) []string {
 	env := withoutEnvironmentKeys(
@@ -172,6 +178,9 @@ command = ["true"]
 
 func preflightHerdRPlugin() error {
 	if err := checkExplorrOnPath(); err != nil {
+		return err
+	}
+	if err := checkJQOnPath(); err != nil {
 		return err
 	}
 	return checkHerdRCapabilities()
