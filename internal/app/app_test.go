@@ -1499,11 +1499,25 @@ func TestResizeRelayoutsEverything(t *testing.T) {
 
 // TestHandleMouse_Wheel routes scroll events to the panel under the cursor.
 func TestHandleMouse_Wheel(t *testing.T) {
-	a := newTestApp(t, t.TempDir())
-	ev := tcell.NewEventMouse(60, 5, tcell.WheelDown, tcell.ModNone)
-	a.handleMouse(ev)
-	ev = tcell.NewEventMouse(60, 5, tcell.WheelUp, tcell.ModNone)
-	a.handleMouse(ev)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "long.txt")
+	if err := os.WriteFile(target, []byte(strings.Repeat("line\n", 100)), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := newTestApp(t, dir)
+	a.openFile(target)
+	tab := a.activeTabPtr()
+	a.draw() // Run renders once before it can receive wheel input.
+
+	a.handleMouse(tcell.NewEventMouse(60, 5, tcell.WheelDown, tcell.ModNone))
+	if got := tab.ScrollY; got != 1 {
+		t.Fatalf("one wheel-down event scrolled %d rows, want native one-row cadence", got)
+	}
+
+	a.handleMouse(tcell.NewEventMouse(60, 5, tcell.WheelUp, tcell.ModNone))
+	if got := tab.ScrollY; got != 0 {
+		t.Fatalf("wheel-up did not return to the starting row: got %d", got)
+	}
 }
 
 // TestHandleMouse_WheelHorizontal confirms WheelLeft / WheelRight events
@@ -1522,6 +1536,7 @@ func TestHandleMouse_WheelHorizontal(t *testing.T) {
 	if tab == nil {
 		t.Fatal("no active tab after openFile")
 	}
+	tab.Wrap = false
 	// Aim well inside the editor pane (past the sidebar, below the tab bar).
 	editorX := a.sidebarW() + 10
 	ev := tcell.NewEventMouse(editorX, 5, tcell.WheelRight, tcell.ModNone)
@@ -1555,6 +1570,7 @@ func TestHandleMouse_ShiftWheelScrollsHorizontally(t *testing.T) {
 	if tab == nil {
 		t.Fatal("no active tab after openFile")
 	}
+	tab.Wrap = false
 	editorX := a.sidebarW() + 10
 
 	// Shift+WheelDown → horizontal scroll right.
@@ -1604,6 +1620,7 @@ func TestHandleMouse_ShiftStickyForWheel(t *testing.T) {
 	a := newTestApp(t, dir)
 	a.openFile(target)
 	tab := a.activeTabPtr()
+	tab.Wrap = false
 	editorX := a.sidebarW() + 10
 
 	// First event: ButtonNone with Shift modifier — what Zellij emits

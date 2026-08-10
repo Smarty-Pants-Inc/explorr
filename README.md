@@ -158,7 +158,7 @@ embeds standalone Monaco with no LSP at all.
 | **Find and *replace*** | Upstream find is case-insensitive substring **jump only** — there was no replace at all. `Esc f` opens the bar; `Tab`, the `›` chevron, or the menu's *Replace in file* expands the replace row. `Alt+c` / `Alt+w` / `Alt+r` toggle case, whole-word and regex — or click `Aa` `ab` `.*`. Enter replaces and advances; Shift+Enter replaces every match **as one undo step**. A pattern that will not compile says so, instead of reporting "no results". |
 | **Auto-closing brackets and quotes** | Pairs close, closers step over, backspace removes both, and a selection gets *surrounded*. Quotes are suppressed after a word character so `don't` never becomes `don''t`. |
 | **A start page** | With no tab open, the pane showed two lines of grey text. It now shows the project, branch, and changed files — each clickable. |
-| **Word wrap** | Upstream has none. `Esc z` reflows long lines to the pane width, breaking on word boundaries, and re-wraps whenever the pane resizes. Off by default, per tab, like VS Code. |
+| **Word wrap** | Upstream has none. Long lines reflow to the pane width by default, breaking on word boundaries and re-wrapping whenever the pane resizes. `Esc z` toggles it per tab when horizontal layout matters. |
 | **A layout that degrades instead of refusing** | Below 50×24 upstream shows *"Window too small — please resize"*. Since the tree is a fixed 30 columns, a side panel was only usable in a narrow band. The tree now **auto-fits**: it grows to show full folder names and narrows toward 18 columns as the pane tightens, hiding only below 42 — a 60-column panel beside an agent still shows files. A splitter drag pins it. Floors drop to **24×8**. |
 | **LSP autocomplete** | `textDocument/completion` with a popup under the cursor. Explicitly invoked with `Esc SPACE` (VS Code's Ctrl+Space) rather than firing as you type: an as-you-type popup needs a debounce, a cancellation story and a dismissal rule, and every one of those failure modes shows up as the editor swallowing a keystroke. Only the four keys the popup owns are consumed; anything else dismisses it and is handled normally. |
 | **A command palette** | `Esc k`. Fuzzy search over every action, built from the action menu rather than from a list of its own — a second list is a second thing to forget to update. Scored with the same matcher as the file finder, because two notions of "fuzzy" in one program is a bug the user experiences as inconsistency. |
@@ -215,7 +215,7 @@ primary surface, because macOS Terminal and tmux frequently swallow right-click.
 | `Esc` `p` | **Find file** in project | fuzzy, background-indexed |
 | `Esc` `h` | **Hover** — types and docs at the cursor | needs a language server |
 | `Esc` `d` | **Go to definition** | needs a language server |
-| `Esc` `z` | Toggle **word wrap** | per tab, off by default |
+| `Esc` `z` | Toggle **word wrap** | per tab, on by default |
 | `Esc` `space` | **Complete at cursor** | LSP autocomplete; explicitly invoked, never as-you-type. `space` mirrors VS Code's Ctrl+Space, and keeps `c` free for the terminal's own clipboard |
 | `Esc` `k` | **Command palette** | fuzzy search over every action |
 | `Esc` `g` | **Go to line** | accepts `N` or `N:C` |

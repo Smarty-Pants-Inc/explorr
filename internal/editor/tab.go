@@ -147,8 +147,8 @@ type Tab struct {
 	ScrollX int      // Index of the first visible column (rune-indexed). Always 0 when Wrap.
 
 	// Wrap reflows long lines onto extra screen rows instead of letting them run off to the right.
-	// Off by default, matching VS Code, and it gates an entirely separate geometry path (wrap.go) --
-	// with Wrap false none of the original one-line-per-row arithmetic changes at all.
+	// On by default for text tabs; users can disable it per tab when horizontal layout matters.
+	// It gates an entirely separate geometry path (wrap.go), so the unwrapped path stays unchanged.
 	Wrap bool
 
 	// ScrollSub is how many of ScrollY's wrapped rows are scrolled off the top. Only meaningful when
@@ -288,6 +288,7 @@ func NewTab(path string) (*Tab, error) {
 		Path:       path,
 		Buffer:     NewBuffer(string(data)),
 		StyleStale: true,
+		Wrap:       true,
 		Mtime:      mtime,
 	}
 	t.IndentUnit = DetectIndent(t.Buffer.Lines, path)

@@ -1071,6 +1071,7 @@ func TestTab_Render_OverflowIndicator_Right(t *testing.T) {
 	defer scr.Fini()
 
 	tab, _ := NewTab("")
+	tab.Wrap = false
 	// 30 chars on one line; viewport content width = 20 - defaultGutterWidth - 1 = 13.
 	tab.Buffer = NewBuffer(strings.Repeat("x", 30))
 	tab.Cursor = Position{Line: 0, Col: 0}
@@ -1095,6 +1096,7 @@ func TestTab_Render_OverflowIndicator_Left(t *testing.T) {
 	defer scr.Fini()
 
 	tab, _ := NewTab("")
+	tab.Wrap = false
 	tab.Buffer = NewBuffer(strings.Repeat("x", 30))
 	tab.ScrollX = 10
 	tab.Cursor = Position{Line: 0, Col: 10}

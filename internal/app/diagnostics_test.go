@@ -43,6 +43,7 @@ func appWithFile(t *testing.T, content string) (*App, string) {
 	}
 	a := newTestApp(t, root)
 	a.openFile(path)
+	a.activeTabPtr().Wrap = false // Diagnostic geometry tests opt into the unwrapped path.
 	return a, path
 }
 

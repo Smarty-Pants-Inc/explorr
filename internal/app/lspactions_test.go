@@ -151,21 +151,21 @@ func TestToggleWrapFlipsTheActiveTab(t *testing.T) {
 	if tab == nil {
 		t.Fatal("no tab")
 	}
-	if tab.Wrap {
-		t.Fatal("wrap should default to off, like VS Code")
-	}
-
-	a.menuToggleWrap()
 	if !tab.Wrap {
-		t.Fatal("toggle did not enable wrap")
-	}
-	if !strings.Contains(a.statusMsg, "Word wrap: on") {
-		t.Fatalf("status: %q", a.statusMsg)
+		t.Fatal("wrap should default to on")
 	}
 
 	a.menuToggleWrap()
 	if tab.Wrap {
 		t.Fatal("toggle did not disable wrap")
+	}
+	if !strings.Contains(a.statusMsg, "Word wrap: off") {
+		t.Fatalf("status: %q", a.statusMsg)
+	}
+
+	a.menuToggleWrap()
+	if !tab.Wrap {
+		t.Fatal("toggle did not enable wrap")
 	}
 
 	// Reachable, which is the point.

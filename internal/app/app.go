@@ -91,8 +91,10 @@ const (
 	statusFlashFor = 3 * time.Second
 	doubleClickMs  = 500 * time.Millisecond
 	doubleEscMs    = 500 * time.Millisecond
-	wheelLines     = 3
-	wheelCols      = 6 // horizontal step per WheelLeft/WheelRight event
+	// One visual row per event matches Herdr's native scroll cadence instead
+	// of multiplying each trackpad event into a three-line jump.
+	wheelLines = 1
+	wheelCols  = 6 // horizontal step per WheelLeft/WheelRight event
 
 	// modifierStickyWindow is how long a previously-seen Shift modifier
 	// state is allowed to persist forward onto the next wheel event.

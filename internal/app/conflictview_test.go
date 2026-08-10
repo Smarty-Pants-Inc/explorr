@@ -289,6 +289,7 @@ func TestConflictTintMarksTheTwoSidesDifferently(t *testing.T) {
 		t.Fatalf("fixture did not produce exactly one region: %+v", tab)
 	}
 	c := tab.Conflicts[0]
+	tab.Wrap = false // This test owns the unwrapped tint path; wrapped behavior has its own test below.
 
 	scr := a.screen.(tcell.SimulationScreen)
 	a.draw()
