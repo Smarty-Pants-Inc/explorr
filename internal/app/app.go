@@ -91,10 +91,13 @@ const (
 	statusFlashFor = 3 * time.Second
 	doubleClickMs  = 500 * time.Millisecond
 	doubleEscMs    = 500 * time.Millisecond
-	// One visual row per event matches Herdr's native scroll cadence instead
-	// of multiplying each trackpad event into a three-line jump.
-	wheelLines = 1
-	wheelCols  = 6 // horizontal step per WheelLeft/WheelRight event
+
+	// Herdr drains each pending raw-input batch and renders at most once every
+	// 16ms. Match that loop instead of redrawing synchronously for every event:
+	// a trackpad flick can emit many wheel reports before one frame is due.
+	minRenderInterval = 16 * time.Millisecond
+	wheelLines        = 1
+	wheelCols         = 6 // horizontal step per WheelLeft/WheelRight event
 
 	// modifierStickyWindow is how long a previously-seen Shift modifier
 	// state is allowed to persist forward onto the next wheel event.
@@ -961,8 +964,10 @@ func (a *App) Close() {
 	}
 }
 
-// Run is the editor's main event loop. It blocks on PollEvent, dispatches
-// each event, redraws, and exits when a.quit is set.
+// Run is the editor's main event loop. Pending input is consumed as a batch,
+// then rendered at Herdr's 60 Hz cadence. Redrawing after every wheel report
+// lets trackpad events outrun the renderer and turns a flick into a delayed,
+// stair-stepped queue; batching keeps the viewport current with the gesture.
 func (a *App) Run() error {
 	a.width, a.height = a.screen.Size()
 	if !a.explorer {
@@ -975,13 +980,18 @@ func (a *App) Run() error {
 	}
 	a.draw()
 	a.screen.Show()
+	lastRender := time.Now()
 
 	for !a.quit {
 		ev := a.screen.PollEvent()
 		if ev == nil {
 			break
 		}
-		a.handleEvent(ev)
+		a.handleEventBatch(ev)
+		if wait := minRenderInterval - time.Since(lastRender); wait > 0 {
+			time.Sleep(wait)
+			a.handlePendingEvents()
+		}
 		a.draw()
 		if !a.explorer {
 			// syncBreakpoints runs BEFORE publishDebug: the panel's breakpoint list
@@ -995,7 +1005,9 @@ func (a *App) Run() error {
 			a.maybeSyncLSP()
 		}
 		a.screen.Show()
+		lastRender = time.Now()
 	}
+
 	if a.explorer {
 		return nil
 	}
@@ -1017,6 +1029,24 @@ func (a *App) Run() error {
 		a.lsp.Stop()
 	}
 	return nil
+}
+
+// handleEventBatch applies the first event plus everything already queued.
+// tcell exposes HasPendingEvent specifically to minimize redraws; Herdr uses
+// the same batch-before-render shape for raw terminal input.
+func (a *App) handleEventBatch(first tcell.Event) {
+	a.handleEvent(first)
+	a.handlePendingEvents()
+}
+
+func (a *App) handlePendingEvents() {
+	for !a.quit && a.screen.HasPendingEvent() {
+		ev := a.screen.PollEvent()
+		if ev == nil {
+			return
+		}
+		a.handleEvent(ev)
+	}
 }
 
 // publishActive tells internal/state where the cursor is. Called once per event from Run rather

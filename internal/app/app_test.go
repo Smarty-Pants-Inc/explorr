@@ -5,12 +5,9 @@
 // Copyright: 2026 Cloudmanic, LLC. All rights reserved.
 // =============================================================================
 
-// Tests for the pure-logic helpers and the small bits of App glue that don't
-// require a live terminal. Where we need an *App we build one against a
-// tcell.SimulationScreen so layout and event-routing helpers can run without
-// touching a real tty. The interactive code paths (Run, the event loop, real
-// drawing) are exercised manually — here we just pin down the helpers so
-// future refactors don't silently regress them.
+// Tests for pure helpers and the small App glue that does not require a live
+// terminal. A tcell.SimulationScreen covers layout, event routing, and queued
+// input batching; real terminal integration remains a manual check.
 
 package app
 
@@ -59,6 +56,29 @@ func newTestApp(t *testing.T, root string) *App {
 	a.setActiveFolder(tree.Root.Path)
 	a.width, a.height = scr.Size()
 	return a
+}
+
+type queuedScreen struct {
+	tcell.SimulationScreen
+	events []tcell.Event
+	next   int
+	shows  int
+}
+
+func (s *queuedScreen) PollEvent() tcell.Event {
+	if !s.HasPendingEvent() {
+		return nil
+	}
+	ev := s.events[s.next]
+	s.next++
+	return ev
+}
+
+func (s *queuedScreen) HasPendingEvent() bool { return s.next < len(s.events) }
+
+func (s *queuedScreen) Show() {
+	s.shows++
+	s.SimulationScreen.Show()
 }
 
 // TestSidebarW_ShownVsHidden verifies the sidebar width helper returns 0
@@ -1517,6 +1537,28 @@ func TestHandleMouse_Wheel(t *testing.T) {
 	a.handleMouse(tcell.NewEventMouse(60, 5, tcell.WheelUp, tcell.ModNone))
 	if got := tab.ScrollY; got != 0 {
 		t.Fatalf("wheel-up did not return to the starting row: got %d", got)
+	}
+}
+
+// TestRunBatchesPendingInput guards the trackpad path: all wheel reports that
+// are already queued render as one frame instead of one full redraw per row.
+func TestRunBatchesPendingInput(t *testing.T) {
+	a := newTestApp(t, t.TempDir())
+	screen := &queuedScreen{
+		SimulationScreen: a.screen.(tcell.SimulationScreen),
+		events: []tcell.Event{
+			tcell.NewEventMouse(1, 5, tcell.WheelDown, tcell.ModNone),
+			tcell.NewEventMouse(1, 5, tcell.WheelDown, tcell.ModNone),
+		},
+	}
+	a.screen = screen
+	a.explorer = true
+
+	if err := a.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got, want := screen.shows, 2; got != want {
+		t.Fatalf("Show called %d times, want %d (initial frame plus one input batch)", got, want)
 	}
 }
 
