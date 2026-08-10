@@ -764,17 +764,13 @@ func New(rootDir string) (*App, error) {
 
 // NewSingleFile is the lean alternative to New for the "spiceedit
 // somefile.md" invocation: no file tree, no project finder index,
-// no background tree-refresh goroutine, sidebar hidden. The user
-// asked for one file — we don't pay the cost of walking and watching
-// the surrounding directory tree just to render a file they wanted
-// to look at in isolation. The tree-toggle row in the action menu
-// is filtered out via the hasTree visibility predicate so the user
-// can't accidentally try to show a sidebar that doesn't exist.
-//
-// rootDir is still recorded (set to the file's parent) so file-level
-// actions that need a base directory — Save As, New File, the
-// relative/absolute path helpers — have somewhere to anchor.
+// no background tree-refresh goroutine, sidebar hidden.
 func NewSingleFile(filePath string) (*App, error) {
+	return NewSingleFileAt(filePath, 1, 1)
+}
+
+// NewSingleFileAt opens one file and places the cursor at a 1-based location.
+func NewSingleFileAt(filePath string, line, col int) (*App, error) {
 	th := theme.Default()
 	scr, err := newScreen(th)
 	if err != nil {
@@ -807,8 +803,17 @@ func NewSingleFile(filePath string) (*App, error) {
 	// openFile loads the file's git gutter markers itself (a file-scoped
 	// `git diff`), so single-file mode shows change bars on open without
 	// the whole-repo status or tree walk that New performs.
-	a.openFile(filePath)
+	a.openFileAt(filePath, line, col)
 	return a, nil
+}
+
+func (a *App) openFileAt(path string, line, col int) {
+	a.openFile(path)
+	tab := a.activeTabPtr()
+	if tab == nil {
+		return
+	}
+	tab.MoveCursorTo(editor.Position{Line: max(1, line) - 1, Col: max(1, col) - 1}, false)
 }
 
 // loadCustomActions reads the user's actions.json (if any) and stores
@@ -1093,21 +1098,7 @@ func (a *App) consumeOpenRequest() {
 	if !a.withinRoot(req.File) {
 		return
 	}
-	a.openFile(req.File)
-	tab := a.activeTabPtr()
-	if tab == nil {
-		return
-	}
-	// The wire is 1-based because that is how every tool prints a location and
-	// how a human reads one; the buffer is 0-based.
-	line, col := req.Line-1, req.Col-1
-	if line < 0 {
-		line = 0
-	}
-	if col < 0 {
-		col = 0
-	}
-	tab.MoveCursorTo(editor.Position{Line: line, Col: col}, false)
+	a.openFileAt(req.File, req.Line, req.Col)
 }
 
 // handleEvent routes a tcell event to its specific handler.

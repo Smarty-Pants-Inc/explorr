@@ -57,7 +57,7 @@ func (a *App) openTreeFile(path string) {
 		return
 	}
 	a.tree.ActiveFile = path
-	if err := openFileInHerdRTab(path); err != nil {
+	if err := OpenFileInHerdRTab(path, 1, 1); err != nil {
 		a.openInfo("Could not open file", []string{err.Error()})
 	}
 }
@@ -73,7 +73,7 @@ type herdrTabCreateResponse struct {
 	} `json:"result"`
 }
 
-func openFileInHerdRTab(path string) error {
+func OpenFileInHerdRTab(path string, line, col int) error {
 	workspaceID := strings.TrimSpace(os.Getenv("HERDR_WORKSPACE_ID"))
 	if workspaceID == "" {
 		return fmt.Errorf("HERDR_WORKSPACE_ID is not set")
@@ -111,7 +111,7 @@ func openFileInHerdRTab(path string) error {
 		cleanup()
 		return err
 	}
-	command := "exec " + shellQuote(executable) + " " + shellQuote(abs)
+	command := "exec " + shellQuote(executable) + " --single-file-at " + shellQuote(abs) + " " + fmt.Sprint(max(1, line)) + " " + fmt.Sprint(max(1, col))
 	if _, err := runHerdR(herdrBin, "pane", "run", paneID, command); err != nil {
 		cleanup()
 		return err

@@ -15,8 +15,10 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/cloudmanic/spice-edit/internal/app"
@@ -31,12 +33,13 @@ import (
 type cliAction string
 
 const (
-	actionEdit     cliAction = "edit"
-	actionExplorer cliAction = "explorer"
-	actionVersion  cliAction = "version"
-	actionHelp     cliAction = "help"
-	actionOpenAt   cliAction = "open-at"
-	actionDebug    cliAction = "debug"
+	actionEdit      cliAction = "edit"
+	actionExplorer  cliAction = "explorer"
+	actionVersion   cliAction = "version"
+	actionHelp      cliAction = "help"
+	actionOpenAt    cliAction = "open-at"
+	actionHerdROpen cliAction = "herdr-open"
+	actionDebug     cliAction = "debug"
 )
 
 // cliResult bundles everything resolveArgs hands back: which top-level
@@ -46,12 +49,77 @@ type cliResult struct {
 	Action   cliAction
 	RootDir  string
 	OpenFile string // empty when no file was named (or for non-edit actions)
+	OpenLine int
+	OpenCol  int
 
 	// DebugAction is the verb for actionDebug, already validated against
 	// state.ValidDebugAction. Empty for every other action.
 	DebugAction string
 
 	Err error
+}
+
+func positivePosition(raw, name string) (int, error) {
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 1 {
+		return 0, fmt.Errorf("%s must be a positive integer", name)
+	}
+	return value, nil
+}
+
+func validateExistingFile(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return fmt.Errorf("expected a file, got directory %q", path)
+	}
+	return nil
+}
+
+func fileURLPosition(values url.Values, name string) (int, error) {
+	raw, ok := values[name]
+	if !ok {
+		return 1, nil
+	}
+	if len(raw) != 1 || raw[0] == "" {
+		return 0, fmt.Errorf("%s must appear once with a positive integer", name)
+	}
+	return positivePosition(raw[0], name)
+}
+
+func parseLocalFileURL(raw string) (string, int, int, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "", 0, 0, err
+	}
+	if parsed.Scheme != "file" || parsed.Opaque != "" || parsed.User != nil || parsed.Fragment != "" || (parsed.Host != "" && parsed.Host != "localhost") {
+		return "", 0, 0, errors.New("--herdr-open needs a local file URL")
+	}
+	path, err := url.PathUnescape(parsed.EscapedPath())
+	if err != nil {
+		return "", 0, 0, err
+	}
+	if !filepath.IsAbs(path) {
+		return "", 0, 0, errors.New("file URL path must be absolute")
+	}
+	if err := validateExistingFile(path); err != nil {
+		return "", 0, 0, err
+	}
+	query, err := url.ParseQuery(parsed.RawQuery)
+	if err != nil {
+		return "", 0, 0, err
+	}
+	line, err := fileURLPosition(query, "line")
+	if err != nil {
+		return "", 0, 0, err
+	}
+	col, err := fileURLPosition(query, "col")
+	if err != nil {
+		return "", 0, 0, err
+	}
+	return path, line, col, nil
 }
 
 // resolveArgs parses the editor's tiny CLI surface. The argument can be:
@@ -100,6 +168,34 @@ func resolveArgs(args []string) cliResult {
 			return cliResult{Err: errors.New("--open-at needs a path, optionally as path:line:col")}
 		}
 		return cliResult{Action: actionOpenAt, OpenFile: args[1]}
+	case "--herdr-open":
+		if len(args) != 2 {
+			return cliResult{Err: errors.New("--herdr-open needs one local file URL")}
+		}
+		path, line, col, err := parseLocalFileURL(args[1])
+		if err != nil {
+			return cliResult{Err: err}
+		}
+		return cliResult{Action: actionHerdROpen, OpenFile: path, OpenLine: line, OpenCol: col}
+	case "--single-file-at":
+		if len(args) != 4 {
+			return cliResult{Err: errors.New("--single-file-at needs a file, line, and column")}
+		}
+		if err := validateExistingFile(args[1]); err != nil {
+			return cliResult{Err: err}
+		}
+		line, err := positivePosition(args[2], "line")
+		if err != nil {
+			return cliResult{Err: err}
+		}
+		col, err := positivePosition(args[3], "column")
+		if err != nil {
+			return cliResult{Err: err}
+		}
+		return cliResult{
+			Action: actionEdit, RootDir: filepath.Dir(args[1]), OpenFile: args[1],
+			OpenLine: line, OpenCol: col,
+		}
 	case "--debug":
 		// Drive an ALREADY-RUNNING editor's debugger. Same mechanism as
 		// --open-at, one file over: the Debug panel mirrors the session out of
@@ -206,6 +302,12 @@ func main() {
 			os.Exit(1)
 		}
 		return
+	case actionHerdROpen:
+		if err := app.OpenFileInHerdRTab(res.OpenFile, res.OpenLine, res.OpenCol); err != nil {
+			fmt.Fprintln(os.Stderr, "herdr-edit:", err)
+			os.Exit(1)
+		}
+		return
 	case actionDebug:
 		// The location is optional and only toggle-breakpoint uses it, but it
 		// goes through the SAME SplitLocation as --open-at rather than a second
@@ -240,7 +342,7 @@ func main() {
 	case res.Action == actionExplorer:
 		a, err = app.NewExplorer(res.RootDir)
 	case res.OpenFile != "":
-		a, err = app.NewSingleFile(res.OpenFile)
+		a, err = app.NewSingleFileAt(res.OpenFile, res.OpenLine, res.OpenCol)
 	default:
 		a, err = app.New(res.RootDir)
 	}

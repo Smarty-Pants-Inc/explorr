@@ -9,6 +9,7 @@ package main
 
 import (
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -146,6 +147,54 @@ func TestResolveArgs_OpenAt(t *testing.T) {
 	}
 	if got := resolveArgs([]string{"--open-at"}); got.Err == nil {
 		t.Error("--open-at with no argument should be an error, not a silent no-op")
+	}
+}
+
+func TestResolveArgs_HerdROpenParsesLocalFileURL(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "odd file#1.go")
+	if err := os.WriteFile(target, []byte("one\ntwo\nthree\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	u := &url.URL{Scheme: "file", Path: target, RawQuery: "line=3&col=2"}
+
+	got := resolveArgs([]string{"--herdr-open", u.String()})
+	if got.Err != nil || got.Action != actionHerdROpen || got.OpenFile != target || got.OpenLine != 3 || got.OpenCol != 2 {
+		t.Fatalf("resolved to %+v", got)
+	}
+}
+
+func TestResolveArgs_HerdROpenRejectsUnsafeTargets(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "target.go")
+	if err := os.WriteFile(file, []byte("package main"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, target := range []string{
+		"https://example.com/target.go",
+		"file://remote.example.com" + file,
+		(&url.URL{Scheme: "file", Path: dir}).String(),
+		(&url.URL{Scheme: "file", Path: filepath.Join(dir, "missing.go")}).String(),
+		(&url.URL{Scheme: "file", Path: file, RawQuery: "line=0"}).String(),
+	} {
+		if got := resolveArgs([]string{"--herdr-open", target}); got.Err == nil {
+			t.Errorf("accepted unsafe target %q: %+v", target, got)
+		}
+	}
+	if got := resolveArgs([]string{"--herdr-open"}); got.Err == nil {
+		t.Error("--herdr-open without a URL should fail")
+	}
+}
+
+func TestResolveArgs_SingleFileAtCarriesPosition(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "target.go")
+	if err := os.WriteFile(file, []byte("package main"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got := resolveArgs([]string{"--single-file-at", file, "12", "4"})
+	if got.Err != nil || got.Action != actionEdit || got.OpenFile != file || got.OpenLine != 12 || got.OpenCol != 4 {
+		t.Fatalf("resolved to %+v", got)
 	}
 }
 

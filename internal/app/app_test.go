@@ -426,6 +426,19 @@ func TestOpenFile_Basic(t *testing.T) {
 	}
 }
 
+func TestOpenFileAtMovesCursorToOneBasedLocation(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "file.txt")
+	if err := os.WriteFile(target, []byte("one\ntwo\nthree\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	a := newTestApp(t, dir)
+	a.openFileAt(target, 2, 3)
+	if got := a.activeTabPtr().Cursor; got.Line != 1 || got.Col != 2 {
+		t.Fatalf("cursor = %+v, want line 1 col 2", got)
+	}
+}
+
 // TestOpenFile_ErrorFlash surfaces an error when the path can't be loaded
 // (here, a directory rather than a file).
 func TestOpenFile_ErrorFlash(t *testing.T) {
@@ -3001,7 +3014,7 @@ esac
 	t.Setenv("HERDR_BIN_PATH", fakeHerdr)
 
 	file := filepath.Join(dir, "odd file's.go")
-	if err := openFileInHerdRTab(file); err != nil {
+	if err := OpenFileInHerdRTab(file, 12, 4); err != nil {
 		t.Fatal(err)
 	}
 	logBytes, err := os.ReadFile(logPath)
@@ -3019,7 +3032,7 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantRun := "pane run wA:2:p1 exec " + shellQuote(executable) + " " + shellQuote(file)
+	wantRun := "pane run wA:2:p1 exec " + shellQuote(executable) + " --single-file-at " + shellQuote(file) + " 12 4"
 	if calls[1] != wantRun {
 		t.Fatalf("run call = %q, want %q", calls[1], wantRun)
 	}
