@@ -1,6 +1,6 @@
 id = "com.smartypants.explorr"
 name = "Explorr"
-version = "1.0.2"
+version = "1.0.3"
 min_herdr_version = "0.8.0"
 description = "Workspace file explorer and editor for HerdR"
 platforms = ["macos"]
