@@ -321,7 +321,8 @@ func TestREADMEReflectsPublishedRelease(t *testing.T) {
 		"https://github.com/Smarty-Pants-Inc/explorr/releases/latest",
 		"brew install Smarty-Pants-Inc/explorr/explorr",
 		"curl -fsSL https://raw.githubusercontent.com/Smarty-Pants-Inc/explorr/main/install.sh | sh",
-		"requires `explorr` and `jq` on `PATH`",
+		"herdr plugin install Smarty-Pants-Inc/explorr/herdr",
+		"bundled lifecycle requires `explorr` and `jq` on",
 	} {
 		if !strings.Contains(string(readme), required) {
 			t.Errorf("released README is missing %q", required)

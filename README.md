@@ -319,6 +319,8 @@ explorr --version
 curl -fsSL https://raw.githubusercontent.com/Smarty-Pants-Inc/explorr/main/install.sh | sh
 ```
 
+The installer verifies the archive against the release's `checksums.txt` before extraction.
+
 ### Build from source
 
 ```sh
@@ -330,7 +332,15 @@ go build -o explorr .
 
 ### Smarty HerdR integration
 
-The bundled integration requires `explorr` and `jq` on `PATH` plus Smarty HerdR 0.8.0 or newer:
+On macOS with `jq` on `PATH`, Smarty HerdR 0.8.0 or newer can install the matching Explorr
+release into its managed plugin checkout:
+
+```sh
+herdr plugin install Smarty-Pants-Inc/explorr/herdr
+```
+
+If Explorr is already installed globally, the bundled lifecycle requires `explorr` and `jq` on
+`PATH` plus Smarty HerdR 0.8.0 or newer:
 
 ```sh
 explorr herdr install

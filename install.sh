@@ -113,6 +113,17 @@ fetch() {
 	fi
 }
 
+# sha256_file prints the archive digest with the native checksum tool.
+sha256_file() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | awk '{print $1}'
+	elif command -v shasum >/dev/null 2>&1; then
+		shasum -a 256 "$1" | awk '{print $1}'
+	else
+		fatal "need sha256sum or shasum to verify release archives"
+	fi
+}
+
 # resolve_version picks the version to install. If the user passed VERSION,
 # trust it as-is (allowing pinned installs). Otherwise we follow GitHub's
 # /releases/latest redirect — that's a single HTTP call with no API rate
@@ -216,6 +227,14 @@ main() {
 
 	fetch "$url" "$tmp/$archive" \
 		|| fatal "download failed (was the release published with this archive name?)"
+	fetch "https://github.com/${REPO}/releases/download/${version}/checksums.txt" "$tmp/checksums.txt" \
+		|| fatal "could not download release checksums"
+
+	expected="$(awk -v file="$archive" '$2 == file { print $1; exit }' "$tmp/checksums.txt")"
+	[ -n "$expected" ] || fatal "checksums.txt does not contain $archive"
+	actual="$(sha256_file "$tmp/$archive")"
+	[ "$actual" = "$expected" ] \
+		|| fatal "checksum mismatch for $archive (expected $expected, got $actual)"
 
 	tar -xzf "$tmp/$archive" -C "$tmp" \
 		|| fatal "extraction failed (archive may be corrupt)"
@@ -229,7 +248,9 @@ main() {
 	install_binary "$tmp/$BINARY" "$dest_dir"
 
 	info "Done. ${BOLD}${dest_dir}/${BINARY}${RESET}${DIM} (${version})${RESET}"
-	warn_if_not_in_path "$dest_dir"
+	if [ "${SKIP_PATH_WARNING:-0}" != "1" ]; then
+		warn_if_not_in_path "$dest_dir"
+	fi
 }
 
 main "$@"
