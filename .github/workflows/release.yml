@@ -59,10 +59,10 @@ jobs:
 
           CURRENT=$(python3 scripts/set-release-version.py --check)
 
-          # If the pushed commit changed either synchronized version file, treat
-          # that as a manual major/minor bump and use the value as-is. Otherwise
-          # auto-bump the patch.
-          if git diff --name-only HEAD~1..HEAD 2>/dev/null | grep -Eq '^(internal/version/version.go|herdr/herdr-plugin.toml)$'; then
+          # A manifest may change without changing the release version. Treat
+          # only edits to the synchronized version declarations as a manual
+          # major/minor bump; other source or manifest changes auto-bump patch.
+          if git diff --unified=0 HEAD~1..HEAD -- internal/version/version.go herdr/herdr-plugin.toml 2>/dev/null | grep -Eq '^[+-](const Version|version) ='; then
             echo "Version was manually edited to $CURRENT — using as-is."
             echo "version=$CURRENT"  >> "$GITHUB_OUTPUT"
             echo "bumped=false"      >> "$GITHUB_OUTPUT"
