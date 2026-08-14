@@ -11,7 +11,7 @@ command = ["sh", "install.sh"]
 [[actions]]
 id = "open-file"
 title = "Open file in Explorr"
-description = "Open a clicked local file link in a same-workspace Explorr tab"
+description = "Open local file links in Reviewr or a same-workspace Explorr right split"
 command = [
   "sh",
   "-c",
@@ -27,7 +27,7 @@ action = "open-file"
 [[panes]]
 id = "explorer"
 title = "explorer"
-description = "Browse the active workspace and open files in Explorr tabs"
+description = "Browse the active workspace and open files in Explorr right splits"
 placement = "workspace_right"
 width = 26
 command = ["sh", "-c", '''if [ -x "$HERDR_PLUGIN_ROOT/bin/explorr" ]; then exec "$HERDR_PLUGIN_ROOT/bin/explorr" --explorer; else exec explorr --explorer; fi''']

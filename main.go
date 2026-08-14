@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -122,6 +123,37 @@ func parseLocalFileURL(raw string) (string, int, int, error) {
 		return "", 0, 0, err
 	}
 	return path, line, col, nil
+}
+
+const reviewMarkdownHelper = "herdr-review-last-markdown"
+
+func isMarkdownFile(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".md", ".markdown":
+		return true
+	default:
+		return false
+	}
+}
+
+// openHerdRFile routes Markdown to Reviewr and all other local files to Explorr.
+// exec inherits HERDR_* so Reviewr receives the clicked pane's source context.
+func openHerdRFile(path string, line, col int) error {
+	if !isMarkdownFile(path) {
+		return app.OpenFileInHerdRSplit(path, line, col)
+	}
+	helper, err := exec.LookPath(reviewMarkdownHelper)
+	if err != nil {
+		return fmt.Errorf("Reviewr Markdown helper %q is not on PATH: %w", reviewMarkdownHelper, err)
+	}
+	output, err := exec.Command(helper, path).CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	if detail := strings.TrimSpace(string(output)); detail != "" {
+		return fmt.Errorf("open Markdown in Reviewr: %s", detail)
+	}
+	return fmt.Errorf("open Markdown in Reviewr: %w", err)
 }
 
 // resolveArgs parses the editor's tiny CLI surface. The argument can be:
@@ -326,7 +358,7 @@ func main() {
 		}
 		return
 	case actionHerdROpen:
-		if err := app.OpenFileInHerdRTab(res.OpenFile, res.OpenLine, res.OpenCol); err != nil {
+		if err := openHerdRFile(res.OpenFile, res.OpenLine, res.OpenCol); err != nil {
 			fmt.Fprintln(os.Stderr, "explorr:", err)
 			os.Exit(1)
 		}
@@ -355,8 +387,8 @@ func main() {
 	}
 
 	// Explorer mode is the workspace-right HerdR integration: one file tree,
-	// no internal editor chrome. File activation creates a regular HerdR tab
-	// running single-file mode instead.
+	// no internal editor chrome. File activation creates a right split running
+	// single-file mode beside the active tiled pane.
 	var (
 		a   *app.App
 		err error

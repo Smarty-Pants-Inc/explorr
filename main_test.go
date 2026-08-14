@@ -164,6 +164,59 @@ func TestResolveArgs_HerdROpenParsesLocalFileURL(t *testing.T) {
 	}
 }
 
+func TestIsMarkdownFile(t *testing.T) {
+	for path, want := range map[string]bool{
+		"notes.md":       true,
+		"NOTES.MARKDOWN": true,
+		"notes.mdx":      false,
+		"notes.go":       false,
+	} {
+		if got := isMarkdownFile(path); got != want {
+			t.Errorf("isMarkdownFile(%q) = %t, want %t", path, got, want)
+		}
+	}
+}
+
+func TestOpenHerdRFileRoutesMarkdownToReviewr(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "Notes.MD")
+	if err := os.WriteFile(target, []byte("# Notes\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	reviewrLog := filepath.Join(dir, "reviewr.log")
+	helper := filepath.Join(dir, reviewMarkdownHelper)
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\nprintf '%s|%s|%s|%s\\n' \"$1\" \"$HERDR_WORKSPACE_ID\" \"$HERDR_PANE_ID\" \"$HERDR_PLUGIN_CONTEXT_JSON\" > \"$REVIEWR_LOG\"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	fakeHerdr := filepath.Join(dir, "herdr")
+	if err := os.WriteFile(fakeHerdr, []byte("#!/bin/sh\nprintf split > \"$HERDR_LOG\"\nexit 1\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	t.Setenv("HOME", dir)
+	t.Setenv("REVIEWR_LOG", reviewrLog)
+	t.Setenv("HERDR_LOG", filepath.Join(dir, "herdr.log"))
+	t.Setenv("HERDR_BIN_PATH", fakeHerdr)
+	t.Setenv("HERDR_WORKSPACE_ID", "wA")
+	t.Setenv("HERDR_PANE_ID", "wA:p1")
+	t.Setenv("HERDR_PLUGIN_CONTEXT_JSON", `{"workspace_id":"wA","focused_pane_id":"wA:p1"}`)
+
+	if err := openHerdRFile(target, 3, 2); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(reviewrLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := target + "|wA|wA:p1|{\"workspace_id\":\"wA\",\"focused_pane_id\":\"wA:p1\"}\n"
+	if string(got) != want {
+		t.Fatalf("Reviewr arguments/context = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(os.Getenv("HERDR_LOG")); !os.IsNotExist(err) {
+		t.Fatalf("Markdown dispatch ran Explorr split command: %v", err)
+	}
+}
+
 func TestResolveArgs_HerdROpenRejectsUnsafeTargets(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "target.go")

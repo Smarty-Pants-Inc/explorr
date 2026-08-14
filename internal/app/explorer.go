@@ -16,7 +16,7 @@ import (
 
 // NewExplorer builds the workspace-right HerdR file tree. It deliberately
 // omits editor tabs, LSPs, publishers, and the project finder: activating a
-// file opens a separate single-file editor in a regular HerdR tab.
+// file opens a single-file editor in a right split beside its source pane.
 func NewExplorer(rootDir string) (*App, error) {
 	th := theme.FromHerdR(theme.Default())
 	scr, err := newScreen(th)
@@ -57,23 +57,21 @@ func (a *App) openTreeFile(path string) {
 		return
 	}
 	a.tree.ActiveFile = path
-	if err := OpenFileInHerdRTab(path, 1, 1); err != nil {
+	if err := OpenFileInHerdRSplit(path, 1, 1); err != nil {
 		a.openInfo("Could not open file", []string{err.Error()})
 	}
 }
 
-type herdrTabCreateResponse struct {
+type herdrPaneSplitResponse struct {
 	Result struct {
-		Tab struct {
-			TabID string `json:"tab_id"`
-		} `json:"tab"`
-		RootPane struct {
+		Pane struct {
 			PaneID string `json:"pane_id"`
-		} `json:"root_pane"`
+		} `json:"pane"`
 	} `json:"result"`
 }
 
-func OpenFileInHerdRTab(path string, line, col int) error {
+// OpenFileInHerdRSplit opens a single-file editor beside the active tiled pane.
+func OpenFileInHerdRSplit(path string, line, col int) error {
 	workspaceID := strings.TrimSpace(os.Getenv("HERDR_WORKSPACE_ID"))
 	if workspaceID == "" {
 		return fmt.Errorf("HERDR_WORKSPACE_ID is not set")
@@ -86,41 +84,31 @@ func OpenFileInHerdRTab(path string, line, col int) error {
 	if err != nil {
 		return err
 	}
-
-	output, err := runHerdR(herdrBin, "tab", "create",
-		"--workspace", workspaceID,
-		"--cwd", filepath.Dir(abs),
-		"--label", filepath.Base(abs),
-		"--no-focus")
-	if err != nil {
-		return err
-	}
-	var created herdrTabCreateResponse
-	if err := json.Unmarshal(output, &created); err != nil {
-		return fmt.Errorf("parse herdr tab create response: %w", err)
-	}
-	tabID := created.Result.Tab.TabID
-	paneID := created.Result.RootPane.PaneID
-	if tabID == "" || paneID == "" {
-		return fmt.Errorf("herdr tab create response omitted tab or pane id")
-	}
-	cleanup := func() { _, _ = runHerdR(herdrBin, "tab", "close", tabID) }
-
 	executable, err := os.Executable()
 	if err != nil {
-		cleanup()
 		return err
 	}
+
+	output, err := runHerdR(herdrBin, "pane", "split",
+		"--workspace", workspaceID,
+		"--direction", "right",
+		"--cwd", filepath.Dir(abs),
+		"--focus")
+	if err != nil {
+		return err
+	}
+	var split herdrPaneSplitResponse
+	if err := json.Unmarshal(output, &split); err != nil {
+		return fmt.Errorf("parse herdr pane split response: %w", err)
+	}
+	paneID := split.Result.Pane.PaneID
+	if paneID == "" {
+		return fmt.Errorf("herdr pane split response omitted pane id")
+	}
+
 	command := "exec " + shellQuote(executable) + " --single-file-at " + shellQuote(abs) + " " + fmt.Sprint(max(1, line)) + " " + fmt.Sprint(max(1, col))
-	if _, err := runHerdR(herdrBin, "pane", "run", paneID, command); err != nil {
-		cleanup()
-		return err
-	}
-	if _, err := runHerdR(herdrBin, "tab", "focus", tabID); err != nil {
-		cleanup()
-		return err
-	}
-	return nil
+	_, err = runHerdR(herdrBin, "pane", "run", paneID, command)
+	return err
 }
 
 func runHerdR(bin string, args ...string) ([]byte, error) {
