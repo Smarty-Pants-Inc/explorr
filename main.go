@@ -24,6 +24,7 @@ import (
 
 	"github.com/Smarty-Pants-Inc/explorr/internal/app"
 	"github.com/Smarty-Pants-Inc/explorr/internal/state"
+	"github.com/Smarty-Pants-Inc/explorr/internal/toolpath"
 	"github.com/Smarty-Pants-Inc/explorr/internal/version"
 )
 
@@ -97,7 +98,7 @@ func parseLocalFileURL(raw string) (string, int, int, error) {
 	if err != nil {
 		return "", 0, 0, err
 	}
-	if parsed.Scheme != "file" || parsed.Opaque != "" || parsed.User != nil || parsed.Fragment != "" || (parsed.Host != "" && parsed.Host != "localhost") {
+	if parsed.Scheme != "file" || parsed.Opaque != "" || parsed.User != nil || parsed.Fragment != "" || (parsed.Host != "" && !strings.EqualFold(parsed.Host, "localhost")) {
 		return "", 0, 0, errors.New("--herdr-open needs a local file URL")
 	}
 	path, err := url.PathUnescape(parsed.EscapedPath())
@@ -136,24 +137,23 @@ func isMarkdownFile(path string) bool {
 	}
 }
 
-// openHerdRFile routes Markdown to Reviewr and all other local files to Explorr.
-// exec inherits HERDR_* so Reviewr receives the clicked pane's source context.
+var openFileInHerdRSplit = app.OpenFileInHerdRSplit
+
+// openHerdRFile sends local Markdown links to Reviewr when its helper works;
+// every other validated local file opens in a same-workspace Explorr right split.
 func openHerdRFile(path string, line, col int) error {
-	if !isMarkdownFile(path) {
-		return app.OpenFileInHerdRSplit(path, line, col)
+	if isMarkdownFile(path) {
+		helper, err := exec.LookPath(reviewMarkdownHelper)
+		if err != nil {
+			helper = toolpath.Look(reviewMarkdownHelper)
+		}
+		if helper != "" {
+			if err := exec.Command(helper, path).Run(); err == nil {
+				return nil
+			}
+		}
 	}
-	helper, err := exec.LookPath(reviewMarkdownHelper)
-	if err != nil {
-		return fmt.Errorf("Reviewr Markdown helper %q is not on PATH: %w", reviewMarkdownHelper, err)
-	}
-	output, err := exec.Command(helper, path).CombinedOutput()
-	if err == nil {
-		return nil
-	}
-	if detail := strings.TrimSpace(string(output)); detail != "" {
-		return fmt.Errorf("open Markdown in Reviewr: %s", detail)
-	}
-	return fmt.Errorf("open Markdown in Reviewr: %w", err)
+	return openFileInHerdRSplit(path, line, col)
 }
 
 // resolveArgs parses the editor's tiny CLI surface. The argument can be:
