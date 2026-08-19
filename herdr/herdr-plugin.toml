@@ -11,7 +11,7 @@ command = ["sh", "install.sh"]
 [[actions]]
 id = "open-file"
 title = "Open file in Explorr"
-description = "Markdown (.md/.markdown) links open in Reviewr with Explorr fallback; other local files open in a same-workspace Explorr right split"
+description = "Markdown (.md/.markdown) links open in Reviewr at their encoded line with Explorr fallback; other local files open in a same-workspace Explorr right split"
 command = [
   "sh",
   "-c",

@@ -57,7 +57,7 @@ func (a *App) openTreeFile(path string) {
 		return
 	}
 	a.tree.ActiveFile = path
-	if err := OpenFileInHerdRSplit(path, 1, 1); err != nil {
+	if err := openFileInHerdRSplit(path, 1, 1, ""); err != nil {
 		a.openInfo("Could not open file", []string{err.Error()})
 	}
 }
@@ -70,12 +70,19 @@ type herdrPaneSplitResponse struct {
 	} `json:"result"`
 }
 
-// OpenFileInHerdRSplit opens a single-file editor beside the active tiled pane.
+// OpenFileInHerdRSplit opens a single-file editor beside the pane that
+// activated the HerdR link.
 func OpenFileInHerdRSplit(path string, line, col int) error {
-	workspaceID := strings.TrimSpace(os.Getenv("HERDR_WORKSPACE_ID"))
-	if workspaceID == "" {
-		return fmt.Errorf("HERDR_WORKSPACE_ID is not set")
+	sourcePaneID := strings.TrimSpace(os.Getenv("HERDR_PANE_ID"))
+	if sourcePaneID == "" {
+		return fmt.Errorf("HERDR_PANE_ID is not set")
 	}
+	return openFileInHerdRSplit(path, line, col, sourcePaneID)
+}
+
+// openFileInHerdRSplit uses workspace focus only for the long-lived explorer
+// panel; link activations pass their captured source pane explicitly.
+func openFileInHerdRSplit(path string, line, col int, sourcePaneID string) error {
 	herdrBin := strings.TrimSpace(os.Getenv("HERDR_BIN_PATH"))
 	if herdrBin == "" {
 		herdrBin = "herdr"
@@ -89,11 +96,21 @@ func OpenFileInHerdRSplit(path string, line, col int) error {
 		return err
 	}
 
-	output, err := runHerdR(herdrBin, "pane", "split",
-		"--workspace", workspaceID,
+	splitArgs := []string{"pane", "split"}
+	if sourcePaneID != "" {
+		splitArgs = append(splitArgs, sourcePaneID)
+	} else {
+		workspaceID := strings.TrimSpace(os.Getenv("HERDR_WORKSPACE_ID"))
+		if workspaceID == "" {
+			return fmt.Errorf("HERDR_WORKSPACE_ID is not set")
+		}
+		splitArgs = append(splitArgs, "--workspace", workspaceID)
+	}
+	splitArgs = append(splitArgs,
 		"--direction", "right",
 		"--cwd", filepath.Dir(abs),
 		"--focus")
+	output, err := runHerdR(herdrBin, splitArgs...)
 	if err != nil {
 		return err
 	}
@@ -107,8 +124,11 @@ func OpenFileInHerdRSplit(path string, line, col int) error {
 	}
 
 	command := "exec " + shellQuote(executable) + " --single-file-at " + shellQuote(abs) + " " + fmt.Sprint(max(1, line)) + " " + fmt.Sprint(max(1, col))
-	_, err = runHerdR(herdrBin, "pane", "run", paneID, command)
-	return err
+	if _, err := runHerdR(herdrBin, "pane", "run", paneID, command); err != nil {
+		_, _ = runHerdR(herdrBin, "pane", "close", paneID)
+		return err
+	}
+	return nil
 }
 
 func runHerdR(bin string, args ...string) ([]byte, error) {

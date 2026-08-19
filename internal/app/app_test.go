@@ -2992,7 +2992,7 @@ func TestExplorerFocusEventsControlTreeHighlight(t *testing.T) {
 	}
 }
 
-func TestOpenFileInHerdRSplitCreatesFocusedRightSplit(t *testing.T) {
+func TestOpenFileInHerdRSplitTargetsCapturedSourcePane(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses a POSIX fake herdr executable")
 	}
@@ -3011,6 +3011,7 @@ esac
 	}
 	t.Setenv("HERDR_TEST_LOG", logPath)
 	t.Setenv("HERDR_WORKSPACE_ID", "wA")
+	t.Setenv("HERDR_PANE_ID", "wA:p7")
 	t.Setenv("HERDR_BIN_PATH", fakeHerdr)
 
 	file := filepath.Join(dir, "odd file's.go")
@@ -3025,7 +3026,7 @@ esac
 	if len(calls) != 2 {
 		t.Fatalf("calls = %q, want split/run", calls)
 	}
-	if want := "pane split --workspace wA --direction right --cwd " + dir + " --focus"; calls[0] != want {
+	if want := "pane split wA:p7 --direction right --cwd " + dir + " --focus"; calls[0] != want {
 		t.Fatalf("split call = %q, want %q", calls[0], want)
 	}
 	executable, err := os.Executable()
@@ -3035,5 +3036,47 @@ esac
 	wantRun := "pane run wA:p2 exec " + shellQuote(executable) + " --single-file-at " + shellQuote(file) + " 12 4"
 	if calls[1] != wantRun {
 		t.Fatalf("run call = %q, want %q", calls[1], wantRun)
+	}
+}
+
+func TestOpenFileInHerdRSplitClosesSplitWhenRunFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses a POSIX fake herdr executable")
+	}
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "calls.log")
+	fakeHerdr := filepath.Join(dir, "herdr")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$HERDR_TEST_LOG"
+case "$1:$2" in
+  pane:split) printf '%s\n' '{"result":{"pane":{"pane_id":"wA:p2"}}}' ;;
+  pane:run) printf '%s\n' 'editor run failed' >&2; exit 1 ;;
+  *) printf '%s\n' '{"result":{}}' ;;
+esac
+`
+	if err := os.WriteFile(fakeHerdr, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_TEST_LOG", logPath)
+	t.Setenv("HERDR_PANE_ID", "wA:p1")
+	t.Setenv("HERDR_BIN_PATH", fakeHerdr)
+
+	err := OpenFileInHerdRSplit(filepath.Join(dir, "file.go"), 1, 1)
+	if err == nil || !strings.Contains(err.Error(), "editor run failed") {
+		t.Fatalf("run failure = %v, want editor error", err)
+	}
+	logBytes, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	calls := strings.Split(strings.TrimSpace(string(logBytes)), "\n")
+	if len(calls) != 3 {
+		t.Fatalf("calls = %q, want split/run/close", calls)
+	}
+	if !strings.HasPrefix(calls[1], "pane run wA:p2 ") {
+		t.Fatalf("run call = %q", calls[1])
+	}
+	if calls[2] != "pane close wA:p2" {
+		t.Fatalf("close call = %q, want pane close wA:p2", calls[2])
 	}
 }

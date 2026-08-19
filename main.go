@@ -139,8 +139,9 @@ func isMarkdownFile(path string) bool {
 
 var openFileInHerdRSplit = app.OpenFileInHerdRSplit
 
-// openHerdRFile sends local Markdown links to Reviewr when its helper works;
-// every other validated local file opens in a same-workspace Explorr right split.
+// openHerdRFile sends local Markdown links and their requested position to
+// Reviewr when its helper works; every other validated local file opens in a
+// same-workspace Explorr right split.
 func openHerdRFile(path string, line, col int) error {
 	if isMarkdownFile(path) {
 		helper, err := exec.LookPath(reviewMarkdownHelper)
@@ -148,7 +149,7 @@ func openHerdRFile(path string, line, col int) error {
 			helper = toolpath.Look(reviewMarkdownHelper)
 		}
 		if helper != "" {
-			if err := exec.Command(helper, path).Run(); err == nil {
+			if err := exec.Command(helper, path, strconv.Itoa(line), strconv.Itoa(col)).Run(); err == nil {
 				return nil
 			}
 		}

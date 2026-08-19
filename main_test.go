@@ -190,7 +190,7 @@ func TestOpenHerdRFileRoutesMarkdownToReviewr(t *testing.T) {
 	}
 	reviewrLog := filepath.Join(dir, "reviewr.log")
 	helper := filepath.Join(dir, reviewMarkdownHelper)
-	if err := os.WriteFile(helper, []byte("#!/bin/sh\nprintf '%s|%s|%s|%s\\n' \"$1\" \"$HERDR_WORKSPACE_ID\" \"$HERDR_PANE_ID\" \"$HERDR_PLUGIN_CONTEXT_JSON\" > \"$REVIEWR_LOG\"\n"), 0755); err != nil {
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\nprintf '%s|%s|%s|%s|%s|%s\\n' \"$1\" \"$2\" \"$3\" \"$HERDR_WORKSPACE_ID\" \"$HERDR_PANE_ID\" \"$HERDR_PLUGIN_CONTEXT_JSON\" > \"$REVIEWR_LOG\"\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	fakeHerdr := filepath.Join(dir, "herdr")
@@ -213,7 +213,7 @@ func TestOpenHerdRFileRoutesMarkdownToReviewr(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := target + "|wA|wA:p1|{\"workspace_id\":\"wA\",\"focused_pane_id\":\"wA:p1\"}\n"
+	want := target + "|3|2|wA|wA:p1|{\"workspace_id\":\"wA\",\"focused_pane_id\":\"wA:p1\"}\n"
 	if string(got) != want {
 		t.Fatalf("Reviewr arguments/context = %q, want %q", got, want)
 	}
@@ -249,7 +249,7 @@ func TestOpenHerdRFileMarkdownUsesReviewr(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "opened")
 	helperDir := t.TempDir()
 	helper := filepath.Join(helperDir, "herdr-review-last-markdown")
-	if err := os.WriteFile(helper, []byte("#!/bin/sh\nprintf '%s' \"$1\" > \"$EXPLORR_TEST_REVIEWR_MARKER\"\n"), 0o755); err != nil {
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\nprintf '%s|%s|%s' \"$1\" \"$2\" \"$3\" > \"$EXPLORR_TEST_REVIEWR_MARKER\"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", helperDir)
@@ -271,8 +271,8 @@ func TestOpenHerdRFileMarkdownUsesReviewr(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if string(got) != target {
-			t.Errorf("Reviewr path = %q, want decoded path %q", got, target)
+		if want := target + "|3|2"; string(got) != want {
+			t.Errorf("Reviewr target = %q, want %q", got, want)
 		}
 	}
 }
@@ -285,7 +285,7 @@ func TestOpenHerdRFileMarkdownFindsReviewrOffPATH(t *testing.T) {
 		t.Fatal(err)
 	}
 	helper := filepath.Join(helperDir, "herdr-review-last-markdown")
-	if err := os.WriteFile(helper, []byte("#!/bin/sh\nprintf '%s' \"$1\" > \"$EXPLORR_TEST_REVIEWR_MARKER\"\n"), 0o755); err != nil {
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\nprintf '%s|%s|%s' \"$1\" \"$2\" \"$3\" > \"$EXPLORR_TEST_REVIEWR_MARKER\"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
@@ -307,8 +307,8 @@ func TestOpenHerdRFileMarkdownFindsReviewrOffPATH(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != target {
-		t.Errorf("Reviewr path = %q, want %q", got, target)
+	if want := target + "|3|2"; string(got) != want {
+		t.Errorf("Reviewr target = %q, want %q", got, want)
 	}
 }
 
