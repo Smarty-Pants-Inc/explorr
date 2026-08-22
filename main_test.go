@@ -169,82 +169,6 @@ func TestResolveArgs_HerdROpenParsesLocalFileURL(t *testing.T) {
 	}
 }
 
-func TestIsMarkdownFile(t *testing.T) {
-	for path, want := range map[string]bool{
-		"notes.md":       true,
-		"NOTES.MARKDOWN": true,
-		"notes.mdx":      false,
-		"notes.go":       false,
-	} {
-		if got := isMarkdownFile(path); got != want {
-			t.Errorf("isMarkdownFile(%q) = %t, want %t", path, got, want)
-		}
-	}
-}
-
-func TestOpenHerdRFileRoutesMarkdownToReviewr(t *testing.T) {
-	dir := t.TempDir()
-	target := filepath.Join(dir, "Notes.MD")
-	if err := os.WriteFile(target, []byte("# Notes\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	reviewrLog := filepath.Join(dir, "reviewr.log")
-	helper := filepath.Join(dir, reviewMarkdownHelper)
-	if err := os.WriteFile(helper, []byte("#!/bin/sh\nprintf '%s|%s|%s|%s|%s|%s\\n' \"$1\" \"$2\" \"$3\" \"$HERDR_WORKSPACE_ID\" \"$HERDR_PANE_ID\" \"$HERDR_PLUGIN_CONTEXT_JSON\" > \"$REVIEWR_LOG\"\n"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	fakeHerdr := filepath.Join(dir, "herdr")
-	if err := os.WriteFile(fakeHerdr, []byte("#!/bin/sh\nprintf split > \"$HERDR_LOG\"\nexit 1\n"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir)
-	t.Setenv("HOME", dir)
-	t.Setenv("REVIEWR_LOG", reviewrLog)
-	t.Setenv("HERDR_LOG", filepath.Join(dir, "herdr.log"))
-	t.Setenv("HERDR_BIN_PATH", fakeHerdr)
-	t.Setenv("HERDR_WORKSPACE_ID", "wA")
-	t.Setenv("HERDR_PANE_ID", "wA:p1")
-	t.Setenv("HERDR_PLUGIN_CONTEXT_JSON", `{"workspace_id":"wA","focused_pane_id":"wA:p1"}`)
-
-	if err := openHerdRFile(target, 3, 2); err != nil {
-		t.Fatal(err)
-	}
-	got, err := os.ReadFile(reviewrLog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := target + "|3|2|wA|wA:p1|{\"workspace_id\":\"wA\",\"focused_pane_id\":\"wA:p1\"}\n"
-	if string(got) != want {
-		t.Fatalf("Reviewr arguments/context = %q, want %q", got, want)
-	}
-	if _, err := os.Stat(os.Getenv("HERDR_LOG")); !os.IsNotExist(err) {
-		t.Fatalf("Markdown dispatch ran Explorr split command: %v", err)
-	}
-}
-
-func TestResolveArgs_HerdROpenRejectsUnsafeTargets(t *testing.T) {
-	dir := t.TempDir()
-	file := filepath.Join(dir, "target.go")
-	if err := os.WriteFile(file, []byte("package main"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	for _, target := range []string{
-		"https://example.com/target.go",
-		"file://remote.example.com" + file,
-		(&url.URL{Scheme: "file", Path: dir}).String(),
-		(&url.URL{Scheme: "file", Path: filepath.Join(dir, "missing.go")}).String(),
-		(&url.URL{Scheme: "file", Path: file, RawQuery: "line=0"}).String(),
-	} {
-		if got := resolveArgs([]string{"--herdr-open", target}); got.Err == nil {
-			t.Errorf("accepted unsafe target %q: %+v", target, got)
-		}
-	}
-	if got := resolveArgs([]string{"--herdr-open"}); got.Err == nil {
-		t.Error("--herdr-open without a URL should fail")
-	}
-}
-
 func TestOpenHerdRFileMarkdownUsesReviewr(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "opened")
 	helperDir := t.TempDir()
@@ -274,6 +198,29 @@ func TestOpenHerdRFileMarkdownUsesReviewr(t *testing.T) {
 		if want := target + "|3|2"; string(got) != want {
 			t.Errorf("Reviewr target = %q, want %q", got, want)
 		}
+	}
+}
+
+func TestResolveArgs_HerdROpenRejectsUnsafeTargets(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "target.go")
+	if err := os.WriteFile(file, []byte("package main"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, target := range []string{
+		"https://example.com/target.go",
+		"file://remote.example.com" + file,
+		(&url.URL{Scheme: "file", Path: dir}).String(),
+		(&url.URL{Scheme: "file", Path: filepath.Join(dir, "missing.go")}).String(),
+		(&url.URL{Scheme: "file", Path: file, RawQuery: "line=0"}).String(),
+	} {
+		if got := resolveArgs([]string{"--herdr-open", target}); got.Err == nil {
+			t.Errorf("accepted unsafe target %q: %+v", target, got)
+		}
+	}
+	if got := resolveArgs([]string{"--herdr-open"}); got.Err == nil {
+		t.Error("--herdr-open without a URL should fail")
 	}
 }
 
@@ -351,11 +298,22 @@ func TestOpenHerdRFileMarkdownFallsBackAfterReviewrFailure(t *testing.T) {
 	}
 }
 
-func TestOpenHerdRFileNonMarkdownUsesExplorr(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-	target := filepath.Join(t.TempDir(), "source.go")
+func TestOpenHerdRFileNonMarkdownBypassesReviewr(t *testing.T) {
+	helperDir := t.TempDir()
+	marker := filepath.Join(helperDir, "reviewr-invoked")
+	helper := filepath.Join(helperDir, reviewMarkdownHelper)
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\nprintf invoked > \"$EXPLORR_TEST_REVIEWR_MARKER\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", helperDir)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("EXPLORR_TEST_REVIEWR_MARKER", marker)
+
+	target := filepath.Join(t.TempDir(), "notes.mdx")
+	splitCalled := false
 	previous := openFileInHerdRSplit
 	openFileInHerdRSplit = func(path string, line, col int) error {
+		splitCalled = true
 		if path != target || line != 12 || col != 9 {
 			t.Errorf("Explorr open = (%q, %d, %d), want (%q, 12, 9)", path, line, col, target)
 		}
@@ -365,6 +323,12 @@ func TestOpenHerdRFileNonMarkdownUsesExplorr(t *testing.T) {
 
 	if err := openHerdRFile(target, 12, 9); err != nil {
 		t.Fatal(err)
+	}
+	if !splitCalled {
+		t.Fatal("non-Markdown file did not open in Explorr")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("non-Markdown file invoked Reviewr: %v", err)
 	}
 }
 

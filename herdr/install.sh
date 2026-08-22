@@ -1,19 +1,17 @@
 #!/bin/sh
 set -eu
 
-plugin_root="$(CDPATH= cd "$(dirname "$0")" && pwd)"
-repo_root="$(dirname "$plugin_root")"
+case "$0" in
+*/*) plugin_root=${0%/*} ;;
+*) plugin_root=. ;;
+esac
+plugin_root="$(CDPATH= cd "$plugin_root" && pwd)"
+repo_root="$(CDPATH= cd "$plugin_root/.." && pwd)"
 
-command -v jq >/dev/null 2>&1 || {
-	printf '%s\n' "explorr: jq is required but not found on PATH" >&2
+command -v go >/dev/null 2>&1 || {
+	printf '%s\n' "explorr: Go is required but not found on PATH" >&2
 	exit 1
 }
 
-version="$(awk -F '"' '/^version = "/ { print $2; exit }' "$plugin_root/herdr-plugin.toml")"
-[ -n "$version" ] || {
-	printf '%s\n' "explorr: could not read the plugin version" >&2
-	exit 1
-}
-
-install_dir="${INSTALL_DIR:-$plugin_root/bin}"
-SKIP_PATH_WARNING=1 VERSION="v$version" INSTALL_DIR="$install_dir" sh "$repo_root/install.sh"
+mkdir -p "$plugin_root/bin"
+go build -o "$plugin_root/bin/explorr" "$repo_root"

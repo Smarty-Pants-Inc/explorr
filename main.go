@@ -129,12 +129,8 @@ func parseLocalFileURL(raw string) (string, int, int, error) {
 const reviewMarkdownHelper = "herdr-review-last-markdown"
 
 func isMarkdownFile(path string) bool {
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".md", ".markdown":
-		return true
-	default:
-		return false
-	}
+	ext := strings.ToLower(filepath.Ext(path))
+	return ext == ".md" || ext == ".markdown"
 }
 
 var openFileInHerdRSplit = app.OpenFileInHerdRSplit
