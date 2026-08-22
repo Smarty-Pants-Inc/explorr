@@ -3,7 +3,7 @@ name = "Explorr"
 version = "1.0.3"
 min_herdr_version = "0.8.0"
 description = "Workspace file explorer and editor for HerdR"
-platforms = ["macos"]
+platforms = ["linux", "macos"]
 
 [[build]]
 command = ["sh", "install.sh"]
