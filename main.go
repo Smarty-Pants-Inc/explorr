@@ -17,12 +17,14 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/Smarty-Pants-Inc/explorr/internal/app"
 	"github.com/Smarty-Pants-Inc/explorr/internal/state"
+	"github.com/Smarty-Pants-Inc/explorr/internal/toolpath"
 	"github.com/Smarty-Pants-Inc/explorr/internal/version"
 )
 
@@ -96,7 +98,7 @@ func parseLocalFileURL(raw string) (string, int, int, error) {
 	if err != nil {
 		return "", 0, 0, err
 	}
-	if parsed.Scheme != "file" || parsed.Opaque != "" || parsed.User != nil || parsed.Fragment != "" || (parsed.Host != "" && parsed.Host != "localhost") {
+	if parsed.Scheme != "file" || parsed.Opaque != "" || parsed.User != nil || parsed.Fragment != "" || (parsed.Host != "" && !strings.EqualFold(parsed.Host, "localhost")) {
 		return "", 0, 0, errors.New("--herdr-open needs a local file URL")
 	}
 	path, err := url.PathUnescape(parsed.EscapedPath())
@@ -122,6 +124,28 @@ func parseLocalFileURL(raw string) (string, int, int, error) {
 		return "", 0, 0, err
 	}
 	return path, line, col, nil
+}
+
+const reviewMarkdownHelper = "herdr-review-last-markdown"
+
+var openFileInHerdRSplit = app.OpenFileInHerdRSplit
+
+// openHerdRFile sends local Markdown links and their requested position to
+// Reviewr when its helper works; every other validated local file opens in a
+// same-workspace Explorr right split.
+func openHerdRFile(path string, line, col int) error {
+	if ext := strings.ToLower(filepath.Ext(path)); ext == ".md" || ext == ".markdown" {
+		helper, err := exec.LookPath(reviewMarkdownHelper)
+		if err != nil {
+			helper = toolpath.Look(reviewMarkdownHelper)
+		}
+		if helper != "" {
+			if err := exec.Command(helper, path, strconv.Itoa(line), strconv.Itoa(col)).Run(); err == nil {
+				return nil
+			}
+		}
+	}
+	return openFileInHerdRSplit(path, line, col)
 }
 
 // resolveArgs parses the editor's tiny CLI surface. The argument can be:
@@ -326,7 +350,7 @@ func main() {
 		}
 		return
 	case actionHerdROpen:
-		if err := app.OpenFileInHerdRTab(res.OpenFile, res.OpenLine, res.OpenCol); err != nil {
+		if err := openHerdRFile(res.OpenFile, res.OpenLine, res.OpenCol); err != nil {
 			fmt.Fprintln(os.Stderr, "explorr:", err)
 			os.Exit(1)
 		}
@@ -355,8 +379,8 @@ func main() {
 	}
 
 	// Explorer mode is the workspace-right HerdR integration: one file tree,
-	// no internal editor chrome. File activation creates a regular HerdR tab
-	// running single-file mode instead.
+	// no internal editor chrome. File activation creates a right split running
+	// single-file mode beside the active tiled pane.
 	var (
 		a   *app.App
 		err error
