@@ -14,7 +14,7 @@ import (
 	"testing"
 )
 
-func TestHerdRManagedInstallBuildsHostBinaryDespiteCrossTargetEnvironment(t *testing.T) {
+func TestHerdRManagedInstallUsesManagerBinaryAndBuildsHostBinaryDespiteGOENV(t *testing.T) {
 	root := t.TempDir()
 	pluginRoot := filepath.Join(root, "herdr")
 	if err := os.Mkdir(pluginRoot, 0o755); err != nil {
@@ -40,28 +40,77 @@ func TestHerdRManagedInstallBuildsHostBinaryDespiteCrossTargetEnvironment(t *tes
 	if err := os.WriteFile(filepath.Join(tools, "herdr"), []byte("#!/bin/sh\nprintf '%s\\n' 'old HerdR'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	newHerdR := filepath.Join(t.TempDir(), "new-herdr")
-	if err := os.WriteFile(newHerdR, []byte(`#!/bin/sh
-test "$1 $2 $3" = "pane split --help" || exit 2
-printf '%s\n' '  --workspace string'
+	outerHerdR := filepath.Join(t.TempDir(), "outer-herdr")
+	if err := os.WriteFile(outerHerdR, []byte(`#!/bin/sh
+case "$1 $2" in
+"plugin install")
+	unset HERDR_BIN_PATH
+	HERDR_BUILD_BIN_PATH="$0" exec /bin/sh "$EXPLORR_TEST_HERDR_INSTALL"
+	;;
+"pane split")
+	test "${3:-}" = "--help" || exit 2
+	printf '%s\n' '  --workspace string'
+	;;
+*)
+	exit 2
+	;;
+esac
 `), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("HERDR_BIN_PATH", newHerdR)
+	t.Setenv("EXPLORR_TEST_HERDR_INSTALL", filepath.Join(pluginRoot, "install.sh"))
 	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
 	crossOS := "linux"
 	if runtime.GOOS == crossOS {
 		crossOS = "darwin"
 	}
-	t.Setenv("GOOS", crossOS)
-	t.Setenv("GOARCH", "amd64")
+	crossArch := "amd64"
+	if runtime.GOARCH == crossArch {
+		crossArch = "arm64"
+	}
+	tuningName, tuningValue := "", ""
+	switch runtime.GOARCH {
+	case "amd64":
+		tuningName, tuningValue = "GOAMD64", "v4"
+	case "arm64":
+		tuningName, tuningValue = "GOARM64", "v9.5"
+	default:
+		t.Skipf("no portable architecture tuning regression fixture for %s", runtime.GOARCH)
+	}
+	goenv := filepath.Join(t.TempDir(), "goenv")
+	goenvContents := strings.Join([]string{
+		"GOOS=" + crossOS,
+		"GOARCH=" + crossArch,
+		tuningName + "=" + tuningValue,
+	}, "\n") + "\n"
+	if err := os.WriteFile(goenv, []byte(goenvContents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOENV", goenv)
+	t.Setenv("GOOS", "")
+	t.Setenv("GOARCH", "")
+	t.Setenv(tuningName, "")
+	if output, err := exec.Command("go", "env", "GOOS").Output(); err != nil || strings.TrimSpace(string(output)) != crossOS {
+		t.Fatalf("GOENV target = %q, %v; want %q", output, err, crossOS)
+	}
+	if output, err := exec.Command("go", "env", tuningName).Output(); err != nil || strings.TrimSpace(string(output)) != tuningValue {
+		t.Fatalf("GOENV %s = %q, %v; want %q", tuningName, output, err, tuningValue)
+	}
 
-	cmd := exec.Command("/bin/sh", "install.sh")
+	cmd := exec.Command(outerHerdR, "plugin", "install", "Smarty-Pants-Inc/explorr/herdr", "--yes")
 	cmd.Dir = pluginRoot
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("managed install failed: %v\n%s", err, output)
 	}
-	output, err := exec.Command(filepath.Join(pluginRoot, "bin", "explorr")).Output()
+	builtBinary := filepath.Join(pluginRoot, "bin", "explorr")
+	buildInfo, err := exec.Command("go", "version", "-m", builtBinary).CombinedOutput()
+	if err != nil {
+		t.Fatalf("read built binary metadata: %v\n%s", err, buildInfo)
+	}
+	if strings.Contains(string(buildInfo), tuningName+"="+tuningValue) {
+		t.Fatalf("built binary retained GOENV %s=%s:\n%s", tuningName, tuningValue, buildInfo)
+	}
+	output, err := exec.Command(builtBinary).Output()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,12 +185,10 @@ func TestHerdRManagedInstallRequiresWorkspaceSplit(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	oldHerdR := filepath.Join(t.TempDir(), "old-herdr")
-	if err := os.WriteFile(oldHerdR, []byte("#!/bin/sh\nprintf '%s\\n' '  --direction string'\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(tools, "herdr"), []byte("#!/bin/sh\nprintf '%s\\n' '  --direction string'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("HERDR_BIN_PATH", oldHerdR)
 
 	cmd := exec.Command("/bin/sh", "install.sh")
 	cmd.Dir = pluginRoot
