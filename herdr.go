@@ -115,6 +115,21 @@ func isolatedHerdREnvironment(root string) []string {
 }
 
 func checkHerdRCapabilities() error {
+	help, err := runHerdR("pane", "split", "--help")
+	if err != nil {
+		return fmt.Errorf("Smarty HerdR with pane split --workspace is required: %w", err)
+	}
+	hasWorkspace := false
+	for _, field := range strings.Fields(string(help)) {
+		if field == "--workspace" || strings.HasPrefix(field, "--workspace=") {
+			hasWorkspace = true
+			break
+		}
+	}
+	if !hasWorkspace {
+		return errors.New("Smarty HerdR with pane split --workspace is required")
+	}
+
 	root, err := os.MkdirTemp("", "explorr-herdr-capabilities-*")
 	if err != nil {
 		return err

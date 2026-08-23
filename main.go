@@ -128,18 +128,13 @@ func parseLocalFileURL(raw string) (string, int, int, error) {
 
 const reviewMarkdownHelper = "herdr-review-last-markdown"
 
-func isMarkdownFile(path string) bool {
-	ext := strings.ToLower(filepath.Ext(path))
-	return ext == ".md" || ext == ".markdown"
-}
-
 var openFileInHerdRSplit = app.OpenFileInHerdRSplit
 
 // openHerdRFile sends local Markdown links and their requested position to
 // Reviewr when its helper works; every other validated local file opens in a
 // same-workspace Explorr right split.
 func openHerdRFile(path string, line, col int) error {
-	if isMarkdownFile(path) {
+	if ext := strings.ToLower(filepath.Ext(path)); ext == ".md" || ext == ".markdown" {
 		helper, err := exec.LookPath(reviewMarkdownHelper)
 		if err != nil {
 			helper = toolpath.Look(reviewMarkdownHelper)

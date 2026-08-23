@@ -37,6 +37,14 @@ case "$HERDR_SOCKET_PATH" in
 esac
 state="${EXPLORR_TEST_HERDR_STATE:?missing state path}"
 case "$1 $2" in
+  "pane split")
+    test "${3:-}" = "--help"
+    if [ "${EXPLORR_TEST_HERDR_WORKSPACE_FLAG:-new}" = "old" ]; then
+      printf '%s\n' 'Usage: herdr pane split [flags]' '  --direction string'
+    else
+      printf '%s\n' 'Usage: herdr pane split [flags]' '  --workspace string'
+    fi
+    ;;
   "plugin link")
     case "$3" in
       *explorr-herdr-capabilities-*) ;;
@@ -116,6 +124,14 @@ esac
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+originalPath)
+	t.Setenv("EXPLORR_TEST_HERDR_WORKSPACE_FLAG", "old")
+	if _, err := runHerdRPluginCommand("install"); err == nil || !strings.Contains(err.Error(), "pane split --workspace is required") {
+		t.Fatalf("missing pane split workspace flag preflight returned %v", err)
+	}
+	if _, err := os.Stat(manifest); !os.IsNotExist(err) {
+		t.Fatalf("missing pane split workspace flag published manifest: %v", err)
+	}
+	t.Setenv("EXPLORR_TEST_HERDR_WORKSPACE_FLAG", "new")
 
 	t.Setenv("EXPLORR_TEST_HERDR_CAPABILITIES", "missing")
 	if _, err := runHerdRPluginCommand("install"); err == nil || !strings.Contains(err.Error(), "workspace-right") {
