@@ -32,6 +32,11 @@ func TestHerdRManagedInstallBuildsCurrentCheckout(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Print(\"current checkout\") }\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	tools := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tools, "jq"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	cmd := exec.Command("/bin/sh", "install.sh")
 	cmd.Dir = pluginRoot
@@ -66,5 +71,31 @@ func TestHerdRManagedInstallRequiresGo(t *testing.T) {
 	output, err := cmd.CombinedOutput()
 	if err == nil || !strings.Contains(string(output), "Go is required but not found on PATH") {
 		t.Fatalf("missing Go returned %v\n%s", err, output)
+	}
+}
+
+func TestHerdRManagedInstallRequiresJQ(t *testing.T) {
+	pluginRoot := filepath.Join(t.TempDir(), "herdr")
+	if err := os.Mkdir(pluginRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script, err := os.ReadFile("herdr/install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginRoot, "install.sh"), script, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "go"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("/bin/sh", "install.sh")
+	cmd.Dir = pluginRoot
+	cmd.Env = append(os.Environ(), "PATH="+binDir)
+	output, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "jq is required but not found on PATH") {
+		t.Fatalf("missing jq returned %v\n%s", err, output)
 	}
 }

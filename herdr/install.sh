@@ -13,5 +13,10 @@ command -v go >/dev/null 2>&1 || {
 	exit 1
 }
 
+command -v jq >/dev/null 2>&1 || {
+	printf '%s\n' "explorr: jq is required but not found on PATH" >&2
+	exit 1
+}
+
 mkdir -p "$plugin_root/bin"
 go build -o "$plugin_root/bin/explorr" "$repo_root"

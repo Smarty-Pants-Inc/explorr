@@ -80,8 +80,8 @@ func OpenFileInHerdRSplit(path string, line, col int) error {
 	return openFileInHerdRSplit(path, line, col, sourcePaneID)
 }
 
-// openFileInHerdRSplit uses workspace focus only for the long-lived explorer
-// panel; link activations pass their captured source pane explicitly.
+// openFileInHerdRSplit sends explicit tiled pane targets positionally;
+// workspace-right plugin pseudo panes target their workspace instead.
 func openFileInHerdRSplit(path string, line, col int, sourcePaneID string) error {
 	herdrBin := strings.TrimSpace(os.Getenv("HERDR_BIN_PATH"))
 	if herdrBin == "" {
@@ -97,7 +97,9 @@ func openFileInHerdRSplit(path string, line, col int, sourcePaneID string) error
 	}
 
 	splitArgs := []string{"pane", "split"}
-	if sourcePaneID != "" {
+	if workspaceID, isPluginPane := strings.CutSuffix(sourcePaneID, ":plugin"); isPluginPane && workspaceID != "" {
+		splitArgs = append(splitArgs, "--workspace", workspaceID)
+	} else if sourcePaneID != "" {
 		splitArgs = append(splitArgs, sourcePaneID)
 	} else {
 		workspaceID := strings.TrimSpace(os.Getenv("HERDR_WORKSPACE_ID"))
