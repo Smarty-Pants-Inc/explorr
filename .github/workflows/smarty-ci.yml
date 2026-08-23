@@ -1,0 +1,46 @@
+name: smarty-ci
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+      - mergify/merge-queue/**
+      - tmp-mergify/merge-queue/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smarty-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smarty-ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify module files
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+      - name: Build and test the command
+        run: |
+          go build .
+          go vet .
+          go test .
+      - name: Verify synchronized release versions
+        run: |
+          python3 scripts/set-release-version.py --self-test
+          python3 scripts/set-release-version.py --check
