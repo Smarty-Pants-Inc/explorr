@@ -25,9 +25,12 @@ func TestReviewrBundleWithoutPluginPATH(t *testing.T) {
 			marker := filepath.Join(t.TempDir(), "argv")
 			script := "#!/bin/sh\n" +
 				"test \"$HERDR_PANE_ID\" = wSource:p1 || exit 9\n" +
-				"printf '%s\\n' \"$@\" > \"$REVIEWR_TEST_ARGS\"\n"
+				"printf '%s\\n' \"$1\" \"$2\" \"$3\" > \"$REVIEWR_TEST_ARGS\"\n" +
+				"test \"$#\" = 6 || exit 10\n"
 			if fails {
 				script += "echo bundled-reviewr-error >&2\nexit 7\n"
+			} else {
+				script += ": > \"$6/ack\"\n"
 			}
 			if err := os.WriteFile(filepath.Join(bin, reviewMarkdownHelper), []byte(script), 0o755); err != nil {
 				t.Fatal(err)
@@ -46,6 +49,9 @@ func TestReviewrBundleWithoutPluginPATH(t *testing.T) {
 			}
 			t.Cleanup(func() { openFileInHerdRSplit = previous })
 			file := filepath.Join(t.TempDir(), "original space:日本.md")
+			if err := os.WriteFile(file, []byte("# x\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
 			err := openHerdRFile(file, 3, 2, false)
 			if fails {
 				if err == nil || !strings.Contains(err.Error(), "bundled-reviewr-error") {

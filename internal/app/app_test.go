@@ -3003,6 +3003,7 @@ func TestOpenFileInHerdRSplitTargetsCapturedSourcePane(t *testing.T) {
 printf '%s\n' "$*" >> "$HERDR_TEST_LOG"
 case "$1:$2" in
   pane:split) printf '%s\n' '{"result":{"pane":{"pane_id":"wA:p2"}}}' ;;
+  pane:run) h=${4##*"--handoff '"}; h=${h%"'"}; : > "$h/ack"; printf '%s\n' '{"result":{}}' ;;
   *) printf '%s\n' '{"result":{}}' ;;
 esac
 `
@@ -3017,6 +3018,9 @@ esac
 	t.Setenv("HERDR_BIN_PATH", fakeHerdr)
 
 	file := filepath.Join(dir, "odd file's.go")
+	if err := os.WriteFile(file, []byte("package odd\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := OpenFileInHerdRSplit(file, 12, 4); err != nil {
 		t.Fatal(err)
 	}
@@ -3035,8 +3039,8 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantRun := "pane run wA:p2 exec " + shellQuote(executable) + " --single-file-at " + shellQuote(file) + " 12 4"
-	if calls[1] != wantRun {
+	wantRun := "pane run wA:p2 exec " + shellQuote(executable) + " --single-file-at " + shellQuote(file) + " 12 4 --expect-parent "
+	if !strings.HasPrefix(calls[1], wantRun) || !strings.Contains(calls[1], " --expect-file '") || !strings.Contains(calls[1], " --handoff '") {
 		t.Fatalf("run call = %q, want %q", calls[1], wantRun)
 	}
 }
@@ -3078,6 +3082,9 @@ esac
 	t.Setenv("HERDR_PANE_ID", "wA:p1")
 	t.Setenv("HERDR_BIN_PATH", fakeHerdr)
 
+	if err := os.WriteFile(filepath.Join(dir, "file.go"), []byte("package f\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	err := OpenFileInHerdRSplit(filepath.Join(dir, "file.go"), 1, 1)
 	if err == nil || !strings.Contains(err.Error(), "editor run failed") {
 		t.Fatalf("run failure = %v, want editor error", err)

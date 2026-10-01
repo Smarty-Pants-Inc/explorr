@@ -105,14 +105,29 @@ the new pane to interact with it. Installing/building alone opens nothing.
 In patched document mode, the visible **Edit original** footer action (also
 uppercase `E`) launches the `herdr-review-edit-original` helper beside the installed
 Reviewr binary with the canonical source file, selected current source line, column `1`, and
-two `DEV:INO` identities: the directory Reviewr holds open, and the original file itself, opened
-through that directory without following symlinks. Reviewr first checks that the held directory
-is still the one at the document's path. The helper never resolves the path: it refuses if the
-name is now a symlink or another file, checks both identities again, and runs
-`explorr --single-file-at FILE LINE COL --expect-parent DIR_ID --expect-file FILE_ID`. Explorr
-opens the name inside its own bound directory without following symlinks and refuses unless both
-identities match. A directory or file replaced after review (including a symlink to a sibling
-file) is refused at every step instead of opening a different file.
+the identify-and-hold handoff described below. Reviewr is the sender here: it opens the original
+through the directory it holds, without following symlinks, and keeps that file open until
+Explorr confirms it bound the same file.
+
+### Identify-and-hold handoff (every route)
+
+Every way a file reaches a new pane uses the same handoff: a Markdown link (Explorr's link
+action, then Reviewr), any other link and an explorer click (Explorr, then a native editor),
+and Reviewr's Edit original (Reviewr, then a native editor).
+
+1. The sender resolves the clicked path once, opens its directory and then the file inside it
+   without following symlinks, and keeps both open. It passes the path, both `DEV:INO`
+   identities, and a private per-launch handoff directory to the receiver.
+2. The helper never resolves the path again. It refuses a symlink or any other file at that
+   name, and checks both identities.
+3. The receiver opens the name inside the directory without following symlinks, refuses
+   unless both identities match, and then writes an acknowledgement in the handoff directory.
+4. Only after that acknowledgement does the sender close its copies, so the file's inode cannot
+   be reused by a replacement in the meantime. A receiver that comes too late finds the
+   handoff withdrawn and refuses.
+
+A file or directory swapped (symlink, hard link, recreated file, replaced directory) anywhere
+in this window is refused instead of opening a different file.
 This does not depend on the new pane inheriting the link action's PATH. Lowercase `e` still edits a
 review comment. The source opens as a native, single-file Explorr editor in
 another explicit, unfocused right split. Reviewr remains the read/review pane;

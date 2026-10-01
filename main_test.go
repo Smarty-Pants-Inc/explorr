@@ -338,7 +338,7 @@ func TestOpenHerdRFileMarkdownUsesReviewr(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "opened")
 	helperDir := t.TempDir()
 	helper := filepath.Join(helperDir, "herdr-review-last-markdown")
-	if err := os.WriteFile(helper, []byte("#!/bin/sh\nprintf '%s|%s|%s' \"$1\" \"$2\" \"$3\" > \"$EXPLORR_TEST_REVIEWR_MARKER\"\n"), 0o755); err != nil {
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\nprintf '%s|%s|%s' \"$1\" \"$2\" \"$3\" > \"$EXPLORR_TEST_REVIEWR_MARKER\"\n: > \"$6/ack\"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", helperDir)
@@ -353,6 +353,9 @@ func TestOpenHerdRFileMarkdownUsesReviewr(t *testing.T) {
 
 	for _, name := range []string{"notes.md", "NOTES.MARKDOWN"} {
 		target := filepath.Join(t.TempDir(), "odd file "+name)
+		if err := os.WriteFile(target, []byte("# notes\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 		if err := openHerdRFile(target, 3, 2, false); err != nil {
 			t.Fatal(err)
 		}
@@ -397,7 +400,7 @@ func TestOpenHerdRFileMarkdownFindsReviewrOffPATH(t *testing.T) {
 		t.Fatal(err)
 	}
 	helper := filepath.Join(helperDir, "herdr-review-last-markdown")
-	if err := os.WriteFile(helper, []byte("#!/bin/sh\nprintf '%s|%s|%s' \"$1\" \"$2\" \"$3\" > \"$EXPLORR_TEST_REVIEWR_MARKER\"\n"), 0o755); err != nil {
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\nprintf '%s|%s|%s' \"$1\" \"$2\" \"$3\" > \"$EXPLORR_TEST_REVIEWR_MARKER\"\n: > \"$6/ack\"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
@@ -412,6 +415,9 @@ func TestOpenHerdRFileMarkdownFindsReviewrOffPATH(t *testing.T) {
 	t.Cleanup(func() { openFileInHerdRSplit = previous })
 
 	target := filepath.Join(t.TempDir(), "notes.md")
+	if err := os.WriteFile(target, []byte("# notes\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := openHerdRFile(target, 3, 2, false); err != nil {
 		t.Fatal(err)
 	}
@@ -463,7 +469,11 @@ func TestOpenHerdRFileReviewrFailureFailsClosed(t *testing.T) {
 	t.Cleanup(func() { openFileInHerdRSplit = previous })
 
 	for _, name := range []string{"notes.md", "notes.json"} {
-		err := openHerdRFile(filepath.Join(t.TempDir(), name), 8, 5, name == "notes.json")
+		target := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		err := openHerdRFile(target, 8, 5, name == "notes.json")
 		if err == nil || !strings.Contains(err.Error(), "exit status 7") || !strings.Contains(err.Error(), "exact file unsupported") {
 			t.Errorf("%s: expected helper status and diagnostic, got %v", name, err)
 		}
@@ -476,7 +486,7 @@ func TestResolveArgsReviewOptInRoutesExactFile(t *testing.T) {
 	helperDir := t.TempDir()
 	marker := filepath.Join(helperDir, "opened")
 	helper := filepath.Join(helperDir, reviewMarkdownHelper)
-	if err := os.WriteFile(helper, []byte("#!/bin/sh\nprintf '%s|%s|%s|%s' \"$#\" \"$1\" \"$2\" \"$3\" > \"$EXPLORR_TEST_REVIEWR_MARKER\"\n"), 0o755); err != nil {
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\nprintf '%s|%s|%s|%s' \"$#\" \"$1\" \"$2\" \"$3\" > \"$EXPLORR_TEST_REVIEWR_MARKER\"\n: > \"$6/ack\"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", helperDir)
@@ -517,7 +527,7 @@ func TestResolveArgsReviewOptInRoutesExactFile(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if want := "3|" + canonical + "|12|9"; string(got) != want {
+			if want := "6|" + canonical + "|12|9"; string(got) != want {
 				t.Errorf("helper argv = %q, want %q", got, want)
 			}
 		}
@@ -563,7 +573,7 @@ func TestResolveArgs_SingleFileAtCarriesPosition(t *testing.T) {
 	if err := os.WriteFile(file, []byte("package main"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	got := resolveArgs([]string{"--single-file-at", file, "12", "4"})
+	got := resolveArgs([]string{"--single-file-at", file, "12", "4", "--expect-parent", "1:2", "--expect-file", "3:4", "--handoff", filepath.Join(filepath.Dir(file), "h")})
 	if got.Err != nil || got.Action != actionEdit || got.OpenFile != file || got.OpenLine != 12 || got.OpenCol != 4 || !got.Isolated {
 		t.Fatalf("resolved to %+v", got)
 	}
@@ -579,8 +589,8 @@ func TestResolveArgs_SingleFileAtExpectPair(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{
-		{"--single-file-at", file, "3", "5", "--expect-parent", "2049:18446744073709551615", "--expect-file", "18446744073709551615:7"},
-		{"--single-file-at", file, "3", "5", "--expect-file", "18446744073709551615:7", "--expect-parent", "2049:18446744073709551615"},
+		{"--single-file-at", file, "3", "5", "--expect-parent", "2049:18446744073709551615", "--expect-file", "18446744073709551615:7", "--handoff", dir},
+		{"--single-file-at", file, "3", "5", "--expect-file", "18446744073709551615:7", "--handoff", dir, "--expect-parent", "2049:18446744073709551615"},
 	} {
 		got := resolveArgs(args)
 		if got.Err != nil || !got.Isolated || got.OpenFile != file || got.OpenLine != 3 || got.OpenCol != 5 ||
@@ -588,8 +598,8 @@ func TestResolveArgs_SingleFileAtExpectPair(t *testing.T) {
 			t.Fatalf("%q resolved to %+v", args, got)
 		}
 	}
-	if got := resolveArgs([]string{"--single-file-at", file, "3", "5"}); got.Err != nil || got.ExpectParent != "" || got.ExpectFile != "" {
-		t.Fatalf("without the pair: %+v", got)
+	if got := resolveArgs([]string{"--single-file-at", file, "3", "5"}); got.Err == nil {
+		t.Fatalf("bare form accepted: %+v", got)
 	}
 	pair := func(parent, fileID string) []string {
 		return []string{"--single-file-at", file, "3", "5", "--expect-parent", parent, "--expect-file", fileID}

@@ -17,6 +17,11 @@ func bindOriginal(string, os.FileInfo, string) (*boundOriginal, error) {
 	return nil, fmt.Errorf("bound-original saving is unsupported on this platform")
 }
 
+// readVerified fails closed: identity-checked loads need the POSIX API.
+func readVerified(string, ParentID, ParentID) ([]byte, os.FileInfo, error) {
+	return nil, nil, fmt.Errorf("identity-checked loading is unsupported on this platform")
+}
+
 // save is unreachable after binding fails, but still cannot perform any writes.
 func (b *boundOriginal) save(string, []byte) (os.FileInfo, error) {
 	return nil, fmt.Errorf("bound-original saving is unsupported on this platform")

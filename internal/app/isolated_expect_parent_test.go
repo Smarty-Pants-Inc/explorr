@@ -53,7 +53,7 @@ func TestIsolatedExpectParentMatchBinds(t *testing.T) {
 	isolatedReceiverEnvironment(t)
 	path, _ := isolatedSaveFiles(t)
 	id := isolatedExpectParentID(t, filepath.Dir(path))
-	a, err := NewIsolatedSingleFileAtExpecting(path, 1, 2, id, isolatedExpectFileID(t, path))
+	a, err := NewIsolatedSingleFileAtExpecting(path, 1, 2, id, isolatedExpectFileID(t, path), t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestIsolatedExpectParentMatchBinds(t *testing.T) {
 	if err != nil || got.String() != id {
 		t.Fatalf("bound parent = %v, %v; want %s", got, err, id)
 	}
-	if a.expect != nil {
+	if a.initialTab != nil {
 		t.Fatal("expectation leaked past construction into later navigation")
 	}
 	tab.InsertString("X") // cursor is at line 1, column 2
@@ -116,9 +116,11 @@ func TestIsolatedExpectParentMismatchFailsClosed(t *testing.T) {
 					t.Fatal(err)
 				}
 				fileID = isolatedExpectFileID(t, path)
+				// Image previews are checked too: another directory's identity refuses.
+				id = isolatedExpectParentID(t, filepath.Dir(victim))
 			}
 			before := isolatedPublisherSnapshot(t)
-			a, err := NewIsolatedSingleFileAtExpecting(path, 1, 1, id, fileID)
+			a, err := NewIsolatedSingleFileAtExpecting(path, 1, 1, id, fileID, t.TempDir())
 			if a != nil || err == nil {
 				if a != nil {
 					a.Close()
@@ -128,8 +130,9 @@ func TestIsolatedExpectParentMismatchFailsClosed(t *testing.T) {
 			if !strings.Contains(err.Error(), "parent") {
 				t.Fatalf("failure is not the parent check: %v", err)
 			}
-			if kind != "malformed" && (screen == nil || !screen.finalized) {
-				t.Fatal("failed constructor did not release its screen")
+			if screen != nil {
+				// v3: the receiver binds, checks and acks BEFORE any screen exists.
+				t.Fatal("refused receiver created a screen")
 			}
 			isolatedPublisherAssertUnchanged(t, before)
 			isolatedSaveAssertBytes(t, victim, "BBB\n")
@@ -145,8 +148,8 @@ func TestIsolatedExpectParentMismatchFailsClosed(t *testing.T) {
 	}
 }
 
-// isolatedExpectPNG is a 1x1 PNG: read-only previews are never bound, so an
-// expected parent cannot be verified for them and must fail closed.
+// isolatedExpectPNG is a 1x1 PNG. Image previews are decoded from the
+// identity-checked descriptors, so a mismatched parent must still fail closed.
 func isolatedExpectPNG() []byte {
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 1, 1))); err != nil {
@@ -165,7 +168,7 @@ func TestIsolatedWithoutExpectParentUnchanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(a.Close)
-	if a.expect != nil || len(a.tabs) != 1 {
+	if a.initialTab != nil || len(a.tabs) != 1 {
 		t.Fatal("plain isolated constructor changed")
 	}
 }

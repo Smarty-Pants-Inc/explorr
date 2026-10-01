@@ -28,6 +28,7 @@ import (
 
 	"github.com/Smarty-Pants-Inc/explorr/internal/app"
 	"github.com/Smarty-Pants-Inc/explorr/internal/editor"
+	"github.com/Smarty-Pants-Inc/explorr/internal/handoff"
 	"github.com/Smarty-Pants-Inc/explorr/internal/state"
 	"github.com/Smarty-Pants-Inc/explorr/internal/toolpath"
 	"github.com/Smarty-Pants-Inc/explorr/internal/version"
@@ -61,12 +62,13 @@ type cliResult struct {
 	OpenCol    int
 	ReviewFile bool // explicit ?review=1, in addition to Markdown's default route
 	Isolated   bool // dedicated --single-file-at launch; ignore shared panel requests
-	// ExpectParent and ExpectFile are --single-file-at's optional, paired,
-	// caller-verified DEV:INO of the file's parent directory and of the file
-	// itself; both set or both empty. The isolated pane fails closed on either
-	// mismatch.
+	// ExpectParent, ExpectFile and Handoff are --single-file-at's REQUIRED
+	// identity triple (handoff contract v3): the sender-held DEV:INO of the
+	// file's parent directory and of the file itself, and the sender's HANDOFF
+	// directory the receiver acknowledges in. The pane fails closed otherwise.
 	ExpectParent string
 	ExpectFile   string
+	Handoff      string
 
 	// DebugAction and HerdRAction hold their validated subcommands.
 	// Both are empty for every other action.
@@ -82,17 +84,6 @@ func positivePosition(raw, name string) (int, error) {
 		return 0, fmt.Errorf("%s must be a positive integer", name)
 	}
 	return value, nil
-}
-
-func validateExistingFile(path string) error {
-	info, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
-	if info.IsDir() {
-		return fmt.Errorf("expected a file, got directory %q", path)
-	}
-	return nil
 }
 
 // localFileHosts mirrors smarty.file-links' empty, localhost, hostname, short
@@ -252,13 +243,21 @@ func parseLocalFileURLForHosts(raw string, hosts map[string]bool) (string, int, 
 
 // reviewMarkdownHelper is a deployment-provided contract, NOT an upstream
 // Reviewr command. Despite its historical name, it must open the explicit
-// canonical filename, line and column supplied as three separate argv values.
+// canonical filename, line and column, with the handoff contract v3 identity
+// triple, supplied as six separate argv values.
 const reviewMarkdownHelper = "herdr-review-last-markdown"
 
 var openFileInHerdRSplit = app.OpenFileInHerdRSplit
 
+// runReviewHelper executes the Reviewr helper; tests substitute a recording fake.
+var runReviewHelper = func(helper string, args ...string) ([]byte, error) {
+	return exec.Command(helper, args...).CombinedOutput()
+}
+
 // openHerdRFile routes Markdown and explicit review=1 links to Reviewr. Missing
 // or failing helpers fail closed; ordinary non-Markdown links still use Explorr.
+// path is the link's single canonical resolution; both routes identify and
+// HOLD it and return only after the receiver acknowledged (handoff contract v3).
 func openHerdRFile(path string, line, col int, review bool) error {
 	if ext := strings.ToLower(filepath.Ext(path)); review || ext == ".md" || ext == ".markdown" {
 		// Herdr supplies the plugin root, but does not prepend its bin to PATH.
@@ -276,49 +275,60 @@ func openHerdRFile(path string, line, col int, review bool) error {
 		if helper == "" {
 			return fmt.Errorf("Reviewr requires deployment-provided helper %q; no Explorr fallback", reviewMarkdownHelper)
 		}
-		output, err := exec.Command(helper, path, strconv.Itoa(line), strconv.Itoa(col)).CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("Reviewr helper %q failed: %w: %s", reviewMarkdownHelper, err, strings.TrimSpace(string(output)))
-		}
-		return nil
+		return handoff.Send(path, func(s *handoff.Sender) error {
+			output, err := runReviewHelper(helper, s.File, strconv.Itoa(line), strconv.Itoa(col), s.ParentID, s.FileID, s.Dir)
+			if err != nil {
+				return fmt.Errorf("Reviewr helper %q failed: %w: %s", reviewMarkdownHelper, err, strings.TrimSpace(string(output)))
+			}
+			return nil
+		})
 	}
 	return openFileInHerdRSplit(path, line, col)
 }
 
-// The Reviewr edit-helper contract's identity options. They come as a pair,
-// trailing --single-file-at FILE LINE COL, each with a decimal DEV:INO.
+// The handoff contract v3 options. All three trail --single-file-at FILE LINE
+// COL, in any order, each exactly once.
 const (
 	expectParentFlag = "--expect-parent"
 	expectFileFlag   = "--expect-file"
+	handoffFlag      = "--handoff"
 )
 
 // singleFileAtUsage is the refusal for any malformed --single-file-at form.
-const singleFileAtUsage = "--single-file-at needs a file, line, and column, optionally followed by " +
-	expectParentFlag + " DEV:INO " + expectFileFlag + " DEV:INO"
+const singleFileAtUsage = "--single-file-at needs FILE LINE COL " +
+	expectParentFlag + " DEV:INO " + expectFileFlag + " DEV:INO " + handoffFlag + " DIR"
 
-// parseExpectPair accepts exactly the two identity options (either order, each
-// once) and nothing else; either alone, a duplicate, an extra word or a
-// malformed DEV:INO is an error. The values are returned normalised.
-func parseExpectPair(rest []string) (parent, file string, err error) {
-	if len(rest) != 4 {
-		return "", "", errors.New(singleFileAtUsage + " (" + expectParentFlag + " and " + expectFileFlag + " must be given together)")
+// parseHandoffTriple accepts exactly the three identity options (any order,
+// each once) and nothing else; a missing, duplicate or extra word, a malformed
+// DEV:INO or a non-absolute/unnormalized HANDOFF is an error. IDs are
+// returned normalised.
+func parseHandoffTriple(rest []string) (parent, file, dir string, err error) {
+	if len(rest) != 6 {
+		return "", "", "", errors.New(singleFileAtUsage + " (all three options are required)")
 	}
 	seen := map[string]string{}
 	for i := 0; i < len(rest); i += 2 {
 		flag, value := rest[i], rest[i+1]
-		if flag != expectParentFlag && flag != expectFileFlag {
-			return "", "", errors.New(singleFileAtUsage)
+		if flag != expectParentFlag && flag != expectFileFlag && flag != handoffFlag {
+			return "", "", "", errors.New(singleFileAtUsage)
 		}
 		if _, dup := seen[flag]; dup {
-			return "", "", fmt.Errorf("%s given twice; %s and %s must be given together", flag, expectParentFlag, expectFileFlag)
+			return "", "", "", fmt.Errorf("%s given twice; %s", flag, singleFileAtUsage)
+		}
+		if flag == handoffFlag {
+			if err := handoff.CheckPath(value); err != nil {
+				return "", "", "", fmt.Errorf("%s: %w", flag, err)
+			}
+			seen[flag] = value
+			continue
 		}
 		id, err := editor.ParseParentID(value)
 		if err != nil {
-			return "", "", fmt.Errorf("%s: %w", flag, err)
+			return "", "", "", fmt.Errorf("%s: %w", flag, err)
 		}
 		seen[flag] = id.String()
 	}
-	return seen[expectParentFlag], seen[expectFileFlag], nil
+	return seen[expectParentFlag], seen[expectFileFlag], seen[handoffFlag], nil
 }
 
 // resolveArgs parses the editor's tiny CLI surface. The argument can be:
@@ -336,11 +346,11 @@ func resolveArgs(args []string) cliResult {
 	if len(args) == 0 {
 		return cliResult{Action: actionEdit, RootDir: "."}
 	}
-	// The identity pair qualifies only a dedicated --single-file-at launch; on
+	// The identity triple qualifies only a dedicated --single-file-at launch; on
 	// any other action it would be silently ignored, so it is refused instead.
 	if args[0] != "--single-file-at" {
 		for _, arg := range args {
-			if arg == expectParentFlag || arg == expectFileFlag {
+			if arg == expectParentFlag || arg == expectFileFlag || arg == handoffFlag {
 				return cliResult{Err: errors.New(arg + " is only valid after --single-file-at FILE LINE COL")}
 			}
 		}
@@ -396,33 +406,31 @@ func resolveArgs(args []string) cliResult {
 		}
 		return cliResult{Action: actionHerdROpen, OpenFile: path, OpenLine: line, OpenCol: col, ReviewFile: review}
 	case "--single-file-at":
-		var expectParent, expectFile string
-		if len(args) > 4 {
-			var err error
-			expectParent, expectFile, err = parseExpectPair(args[4:])
-			if err != nil {
-				return cliResult{Err: err}
-			}
-			args = args[:4]
-		}
-		if len(args) != 4 {
+		// FILE LINE COL plus the REQUIRED triple; the bare form is refused.
+		if len(args) < 4 {
 			return cliResult{Err: errors.New(singleFileAtUsage)}
 		}
-		if err := validateExistingFile(args[1]); err != nil {
-			return cliResult{Err: err}
-		}
-		line, err := positivePosition(args[2], "line")
+		expectParent, expectFile, handoffDir, err := parseHandoffTriple(args[4:])
 		if err != nil {
 			return cliResult{Err: err}
 		}
-		col, err := positivePosition(args[3], "column")
-		if err != nil {
+		// FILE is the sender's single resolution: never stat'ed or resolved
+		// here; the receiver binds it no-follow relative to its parent.
+		if err := handoff.CheckPath(args[1]); err != nil {
 			return cliResult{Err: err}
+		}
+		line, lineErr := positivePosition(args[2], "line")
+		if lineErr != nil {
+			return cliResult{Err: lineErr}
+		}
+		col, colErr := positivePosition(args[3], "column")
+		if colErr != nil {
+			return cliResult{Err: colErr}
 		}
 		return cliResult{
 			Action: actionEdit, RootDir: filepath.Dir(args[1]), OpenFile: args[1],
 			OpenLine: line, OpenCol: col, Isolated: true,
-			ExpectParent: expectParent, ExpectFile: expectFile,
+			ExpectParent: expectParent, ExpectFile: expectFile, Handoff: handoffDir,
 		}
 	case "--debug":
 		// Drive an ALREADY-RUNNING editor's debugger. Same mechanism as
@@ -583,10 +591,9 @@ func main() {
 	switch {
 	case res.Action == actionExplorer:
 		a, err = app.NewExplorer(res.RootDir)
-	case res.Isolated && (res.ExpectParent != "" || res.ExpectFile != ""):
-		a, err = app.NewIsolatedSingleFileAtExpecting(res.OpenFile, res.OpenLine, res.OpenCol, res.ExpectParent, res.ExpectFile)
 	case res.Isolated:
-		a, err = app.NewIsolatedSingleFileAt(res.OpenFile, res.OpenLine, res.OpenCol)
+		// resolveArgs never yields Isolated without the full triple.
+		a, err = app.NewIsolatedSingleFileAtExpecting(res.OpenFile, res.OpenLine, res.OpenCol, res.ExpectParent, res.ExpectFile, res.Handoff)
 	case res.OpenFile != "":
 		a, err = app.NewSingleFileAt(res.OpenFile, res.OpenLine, res.OpenCol)
 	default:

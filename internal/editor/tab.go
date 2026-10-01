@@ -289,6 +289,12 @@ func NewTab(path string) (*Tab, error) {
 			mtime = info.ModTime()
 		}
 	}
+	return newTextTab(path, data, mtime, loadedInfo), nil
+}
+
+// newTextTab builds a text tab from contents already read from loadedInfo's
+// object (nil for a missing file).
+func newTextTab(path string, data []byte, mtime time.Time, loadedInfo os.FileInfo) *Tab {
 	t := &Tab{
 		Path:       path,
 		Buffer:     NewBuffer(string(data)),
@@ -306,6 +312,32 @@ func NewTab(path string) (*Tab, error) {
 	// content hash still matches what's on disk right now (data), so a
 	// stale or foreign history can never get replayed onto this buffer.
 	t.loadPersistedUndo(data)
+	return t
+}
+
+// NewBoundTab is the handoff receiver's load: path must be absolute and
+// normalized and is never resolved. dirname(path) is opened as a directory and
+// must have identity wantParent; basename is opened relative to it with
+// O_NOFOLLOW|O_NONBLOCK, must be a regular file with identity wantFile, and is
+// read from THAT descriptor. The tab is then bound (BindOriginal re-checks the
+// loaded object and contents), so what it shows and saves is the checked file.
+// Images become read-only previews decoded from those same checked bytes.
+func NewBoundTab(path string, wantParent, wantFile ParentID) (*Tab, error) {
+	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return nil, fmt.Errorf("bound open needs an absolute, normalized path, got %q", path)
+	}
+	data, info, err := readVerified(path, wantParent, wantFile)
+	if err != nil {
+		return nil, err
+	}
+	if isImageExt(path) {
+		return newBoundImageTab(path, data, info)
+	}
+	t := newTextTab(path, data, info.ModTime(), info)
+	if err := t.BindOriginal(); err != nil {
+		_ = t.Close()
+		return nil, err
+	}
 	return t, nil
 }
 
@@ -419,6 +451,11 @@ func (t *Tab) Reload() error {
 		return fmt.Errorf("no path set for tab")
 	}
 	if t.IsImage() {
+		// A bound preview shows what the identity check read; re-reading the
+		// path could show a file swapped in since, so it never reloads.
+		if t.originalBound {
+			return fmt.Errorf("%s is a linked preview and does not reload from its path", filepath.Base(t.Path))
+		}
 		img, format, err := decodeImageFile(t.Path)
 		if err != nil {
 			return err

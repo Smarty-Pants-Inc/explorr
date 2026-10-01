@@ -61,6 +61,46 @@ func bindOriginal(path string, loaded os.FileInfo, contents string) (*boundOrigi
 	return b, nil
 }
 
+// readVerified opens dirname(path) and requires wantParent, then opens the
+// basename relative to it (no-follow, non-blocking), requires a regular file
+// with wantFile, and only then reads from that same descriptor. Nothing of a
+// mismatched object is read, and a FIFO or device swapped in cannot hang it.
+func readVerified(path string, wantParent, wantFile ParentID) ([]byte, os.FileInfo, error) {
+	dir := filepath.Dir(path)
+	fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	parent := os.NewFile(uintptr(fd), dir)
+	defer parent.Close()
+	parentInfo, err := parent.Stat()
+	if err != nil {
+		return nil, nil, err
+	}
+	if got, err := statID(parentInfo, "parent"); err != nil {
+		return nil, nil, err
+	} else if got != wantParent {
+		return nil, nil, fmt.Errorf("parent directory identity %s does not match expected %s", got, wantParent)
+	}
+	b := &boundOriginal{path: path, name: filepath.Base(path), parent: parent}
+	f, info, err := b.openEntry(unix.O_RDONLY)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer f.Close()
+	if got, err := statID(info, "file"); err != nil {
+		return nil, nil, err
+	} else if got != wantFile {
+		return nil, nil, fmt.Errorf("original file identity %s does not match expected %s", got, wantFile)
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, nil, err
+	}
+	info, err = f.Stat()
+	return data, info, err
+}
+
 // checkParent requires the displayed path to still name the held parent object.
 // Ancestor symlinks already present on load (e.g. macOS /tmp) are allowed, but
 // redirecting any ancestor to a different directory fails. Writes never use it.

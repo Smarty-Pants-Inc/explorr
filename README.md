@@ -79,7 +79,9 @@ panel state. Their text saves bind the original file and directory: a replaced f
 is refused without discarding your edits. Automatic path-based format-on-save is disabled in
 these dedicated panes; ordinary project editors retain it. Dedicated panes edit only their one
 file: rename symbol, workspace-wide fixes, file create/rename/delete, custom actions, and
-debugging are refused there. Linking the plugin or creating a
+debugging are refused there. Every link and explorer click hands the clicked file to its new
+pane with the identify-and-hold handoff described in [`reviewr/`](reviewr/README.md): a file or
+directory swapped in the meantime is refused. Linking the plugin or creating a
 workspace does **not** automatically create explorer sidebars.
 
 To explicitly open the explorer beside your current HerdR pane:

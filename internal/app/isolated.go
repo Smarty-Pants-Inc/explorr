@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	"github.com/Smarty-Pants-Inc/explorr/internal/editor"
+	"github.com/Smarty-Pants-Inc/explorr/internal/handoff"
 )
 
 // isolatedRefusalPrefix starts the flash shown when a linked single-file pane
@@ -30,17 +31,19 @@ func (a *App) refuseIsolated(action string) bool {
 	return true
 }
 
-// isolatedExpectation is the caller-verified identity pair (Reviewr's edit
-// helper) the initial isolated tab must HOLD: its parent directory and the
-// original file itself, both decimal DEV:INO. The parent alone cannot stop a
-// same-folder name swap (A.md -> B.md); the file identity can.
-type isolatedExpectation struct {
-	parent editor.ParentID
-	file   editor.ParentID
-}
-
-// parseIsolatedExpectation parses both identities; either malformed fails.
-func parseIsolatedExpectation(parentID, fileID string) (*isolatedExpectation, error) {
+// ReceiveHandoff is the --single-file-at receiver step of handoff contract v3:
+// FILE (absolute, normalized, never resolved) is opened relative to its parent
+// with O_NOFOLLOW and bound (editor.NewBoundTab), both HELD identities are
+// checked against parentID and fileID, and only then is HANDOFF/ack created
+// (handoff.Acknowledge). Any failure returns no tab: the bound descriptors are
+// released and nothing has been written. The caller registers the returned tab.
+func ReceiveHandoff(filePath, parentID, fileID, handoffDir string) (*editor.Tab, error) {
+	if err := handoff.CheckPath(filePath); err != nil {
+		return nil, err
+	}
+	if err := handoff.CheckPath(handoffDir); err != nil {
+		return nil, fmt.Errorf("handoff: %w", err)
+	}
 	parent, err := editor.ParseParentID(parentID)
 	if err != nil {
 		return nil, fmt.Errorf("expected parent: %w", err)
@@ -49,26 +52,43 @@ func parseIsolatedExpectation(parentID, fileID string) (*isolatedExpectation, er
 	if err != nil {
 		return nil, fmt.Errorf("expected file: %w", err)
 	}
-	return &isolatedExpectation{parent: parent, file: file}, nil
+	t, err := editor.NewBoundTab(filePath, parent, file)
+	if err != nil {
+		return nil, fmt.Errorf("cannot open %s: %w", filePath, err)
+	}
+	// Text tabs re-check the identities on the descriptors they keep for Save.
+	// Image previews keep none: NewBoundTab already checked both identities on
+	// the very descriptors it read the image from, and they never re-read.
+	if !t.IsImage() {
+		if err := checkExpected(t, parent, file); err != nil {
+			_ = t.Close()
+			return nil, fmt.Errorf("cannot open %s: %w", filePath, err)
+		}
+	}
+	if err := handoff.Acknowledge(handoffDir); err != nil {
+		_ = t.Close()
+		return nil, fmt.Errorf("cannot open %s: %w", filePath, err)
+	}
+	return t, nil
 }
 
 // checkExpected requires t's held parent descriptor AND its held no-follow
 // original descriptor to have exactly the expected identities. Unbound tabs
 // (failed binds, read-only previews) have neither and therefore fail.
-func checkExpected(t *editor.Tab, want isolatedExpectation) error {
+func checkExpected(t *editor.Tab, wantParent, wantFile editor.ParentID) error {
 	gotParent, err := t.BoundParentID()
 	if err != nil {
 		return fmt.Errorf("cannot verify parent directory: %w", err)
 	}
-	if gotParent != want.parent {
-		return fmt.Errorf("parent directory identity %s does not match expected %s", gotParent, want.parent)
+	if gotParent != wantParent {
+		return fmt.Errorf("parent directory identity %s does not match expected %s", gotParent, wantParent)
 	}
 	gotFile, err := t.BoundFileID()
 	if err != nil {
 		return fmt.Errorf("cannot verify original file: %w", err)
 	}
-	if gotFile != want.file {
-		return fmt.Errorf("original file identity %s does not match expected %s", gotFile, want.file)
+	if gotFile != wantFile {
+		return fmt.Errorf("original file identity %s does not match expected %s", gotFile, wantFile)
 	}
 	return nil
 }

@@ -7,10 +7,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/Smarty-Pants-Inc/explorr/internal/filetree"
+	"github.com/Smarty-Pants-Inc/explorr/internal/handoff"
 	"github.com/Smarty-Pants-Inc/explorr/internal/theme"
 )
 
@@ -51,14 +53,76 @@ func NewExplorer(rootDir string) (*App, error) {
 	return a, nil
 }
 
+// openTreeFile opens a clicked tree file. In the explorer this is the explorer
+// sender route of handoff contract v3: the tree path is resolved ONCE to its
+// canonical FILE, which is identified, held and launched synchronously (so an
+// origin or launch failure is shown at once), while the up-to-15 s wait for
+// the receiver's ack runs off the UI goroutine and reports back through an
+// explorerOpenDoneEvent.
 func (a *App) openTreeFile(path string) {
 	if !a.explorer {
 		a.openFile(path)
 		return
 	}
 	a.tree.ActiveFile = path
-	if err := OpenFileInHerdRSplit(path, 1, 1); err != nil {
+	sender, err := startTreeFileInHerdRSplit(path)
+	if err != nil {
 		a.openInfo("Could not open file", []string{err.Error()})
+		return
+	}
+	scr := a.screen
+	go func() {
+		err := sender.Await()
+		if scr != nil {
+			_ = scr.PostEvent(&explorerOpenDoneEvent{when: time.Now(), path: path, err: err})
+		}
+	}()
+}
+
+// startTreeFileInHerdRSplit is the explorer's single resolution step followed
+// by the shared sender's identify, hold and launch.
+func startTreeFileInHerdRSplit(path string) (*handoff.Sender, error) {
+	sourcePaneID := strings.TrimSpace(os.Getenv("HERDR_PANE_ID"))
+	if err := checkHerdROrigin(sourcePaneID); err != nil {
+		return nil, err
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	canonical, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return nil, err
+	}
+	return startFileInHerdRSplit(herdrRunner, canonical, 1, 1, sourcePaneID)
+}
+
+// checkHerdROrigin requires an explicit tiled originating pane.
+func checkHerdROrigin(sourcePaneID string) error {
+	if sourcePaneID == "" {
+		return fmt.Errorf("HERDR_PANE_ID is not set; cannot identify the originating pane")
+	}
+	if strings.HasSuffix(sourcePaneID, ":plugin") {
+		return fmt.Errorf("HERDR_PANE_ID %q is a legacy sidebar, not a tiled originating pane", sourcePaneID)
+	}
+	return nil
+}
+
+// explorerOpenDoneEvent carries an explorer launch's acknowledgement result
+// back to the UI goroutine.
+type explorerOpenDoneEvent struct {
+	when time.Time
+	path string
+	err  error
+}
+
+// When satisfies the tcell.Event interface.
+func (e *explorerOpenDoneEvent) When() time.Time { return e.when }
+
+// handleExplorerOpenDone shows a failed handoff; success needs no message.
+func (a *App) handleExplorerOpenDone(e *explorerOpenDoneEvent) {
+	if e.err != nil {
+		a.openInfo("Could not open file", []string{filepath.Base(e.path) + ": " + e.err.Error()})
 	}
 }
 
@@ -70,41 +134,72 @@ type herdrPaneSplitResponse struct {
 	} `json:"result"`
 }
 
+// HerdRRunner runs one herdr manager command and returns its output.
+type HerdRRunner func(bin string, args ...string) ([]byte, error)
+
+// herdrRunner is the production manager; tests substitute a recording fake.
+var herdrRunner HerdRRunner = runHerdR
+
 // OpenFileInHerdRSplit opens a single-file editor beside the originating pane.
 // HerdR injects HERDR_PANE_ID for both link actions and ordinary plugin panes.
+// path is the sender's already resolved FILE (absolute, normalized); it is not
+// resolved again. It returns only after the receiver acknowledged (or the
+// handoff failed), so --herdr-open holds the file until then.
 func OpenFileInHerdRSplit(path string, line, col int) error {
-	return openFileInHerdRSplit(path, line, col, strings.TrimSpace(os.Getenv("HERDR_PANE_ID")))
+	return OpenFileInHerdRSplitWith(herdrRunner, path, line, col)
 }
 
-// openFileInHerdRSplit requires an explicit tiled origin; missing or legacy
-// sidebar origins must never fall back to another client's focused pane.
-func openFileInHerdRSplit(path string, line, col int, sourcePaneID string) error {
-	if sourcePaneID == "" {
-		return fmt.Errorf("HERDR_PANE_ID is not set; cannot identify the originating pane")
+// OpenFileInHerdRSplitWith is OpenFileInHerdRSplit through an explicit
+// manager runner: identify and hold FILE, launch the receiver with the
+// identity triple, then wait for its ack and run the close steps.
+func OpenFileInHerdRSplitWith(run HerdRRunner, path string, line, col int) error {
+	sender, err := startFileInHerdRSplit(run, path, line, col, strings.TrimSpace(os.Getenv("HERDR_PANE_ID")))
+	if err != nil {
+		return err
 	}
-	if strings.HasSuffix(sourcePaneID, ":plugin") {
-		return fmt.Errorf("HERDR_PANE_ID %q is a legacy sidebar, not a tiled originating pane", sourcePaneID)
+	return sender.Await()
+}
+
+// startFileInHerdRSplit requires an explicit tiled origin; missing or legacy
+// sidebar origins must never fall back to another client's focused pane. It
+// identifies and HOLDS FILE (handoff.Identify) before launching
+// `--single-file-at FILE LINE COL --expect-parent P --expect-file F --handoff H`
+// in a new split; a launch failure runs the handoff close steps. On success
+// the caller must Await the returned sender.
+func startFileInHerdRSplit(run HerdRRunner, path string, line, col int, sourcePaneID string) (*handoff.Sender, error) {
+	if err := checkHerdROrigin(sourcePaneID); err != nil {
+		return nil, err
 	}
 	herdrBin := strings.TrimSpace(os.Getenv("HERDR_BIN_PATH"))
 	if herdrBin == "" {
 		herdrBin = "herdr"
 	}
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return err
+	if err := handoff.CheckPath(path); err != nil {
+		return nil, err
 	}
 	executable, err := os.Executable()
 	if err != nil {
-		return err
+		return nil, err
 	}
+	sender, err := handoff.Identify(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := launchHerdRSplit(run, herdrBin, executable, sender, line, col, sourcePaneID); err != nil {
+		return nil, sender.Abort(err)
+	}
+	return sender, nil
+}
 
+// launchHerdRSplit creates the unfocused split and runs the receiver in it.
+func launchHerdRSplit(run HerdRRunner, herdrBin, executable string, s *handoff.Sender, line, col int, sourcePaneID string) error {
 	// The public CLI has no originating-client focus token. Keep focus unchanged
 	// rather than changing session focus on behalf of an unrelated client.
 	splitArgs := []string{"pane", "split", "--pane", sourcePaneID,
 		"--direction", "right",
-		"--cwd", filepath.Dir(abs),
+		"--cwd", filepath.Dir(s.File),
 		"--no-focus"}
-	output, err := runHerdR(herdrBin, splitArgs...)
+	output, err := run(herdrBin, splitArgs...)
 	if err != nil {
 		return err
 	}
@@ -117,9 +212,13 @@ func openFileInHerdRSplit(path string, line, col int, sourcePaneID string) error
 		return fmt.Errorf("herdr pane split response omitted pane id")
 	}
 
-	command := "exec " + shellQuote(executable) + " --single-file-at " + shellQuote(abs) + " " + fmt.Sprint(max(1, line)) + " " + fmt.Sprint(max(1, col))
-	if _, err := runHerdR(herdrBin, "pane", "run", paneID, command); err != nil {
-		_, _ = runHerdR(herdrBin, "pane", "close", paneID)
+	// Every variable word is quoted; flags and decimal positions are literal.
+	command := "exec " + shellQuote(executable) + " --single-file-at " + shellQuote(s.File) +
+		" " + fmt.Sprint(max(1, line)) + " " + fmt.Sprint(max(1, col)) +
+		" --expect-parent " + shellQuote(s.ParentID) + " --expect-file " + shellQuote(s.FileID) +
+		" --handoff " + shellQuote(s.Dir)
+	if _, err := run(herdrBin, "pane", "run", paneID, command); err != nil {
+		_, _ = run(herdrBin, "pane", "close", paneID)
 		return err
 	}
 	return nil

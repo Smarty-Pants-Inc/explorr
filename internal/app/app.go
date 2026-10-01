@@ -412,9 +412,10 @@ type App struct {
 	// Their shared publishers/store stay nil so they cannot overwrite another editor's state.
 	// Root containment and sequence floors cannot attribute a sibling's fresh request.
 	isolated bool
-	// expect is the caller-verified parent AND file identity pair the initial
-	// isolated tab must hold; nil once construction finishes.
-	expect *isolatedExpectation
+	// initialTab is the handoff receiver's already bound, checked and
+	// acknowledged tab, registered by the constructor's first openFile; nil
+	// once construction finishes.
+	initialTab *editor.Tab
 
 	rootDir   string
 	tree      *filetree.Tree
@@ -783,38 +784,34 @@ func NewSingleFileAt(filePath string, line, col int) (*App, error) {
 	return newSingleFileAt(filePath, line, col, false, nil)
 }
 
-// NewIsolatedSingleFileAt opens a dedicated link/edit pane at a 1-based location.
-// It neither accepts shared open/debug requests nor loads/publishes shared editor
-// state; explicit user actions (including navigation and debugging) remain available.
-// Editable files bind their loaded identity; read-only previews need no binding.
-func NewIsolatedSingleFileAt(filePath string, line, col int) (*App, error) {
-	return newSingleFileAt(filePath, line, col, true, nil)
-}
-
-// NewIsolatedSingleFileAtExpecting is NewIsolatedSingleFileAt for callers
-// that already verified both the original file and its parent directory
-// (Reviewr's edit helper): parentID and fileID are the decimal DEV:INO they
-// checked. filePath's basename is opened relative to the held parent with
-// O_NOFOLLOW (BindOriginal), and the constructor fails closed (nil app, error,
-// no tab registered, no writes) unless the held parent AND the held original
-// have exactly those identities. A parent replaced after the caller's check,
-// or the name redirected inside the same parent (symlink, hard link, or atomic
-// replacement), is never opened. Read-only previews cannot be bound and fail.
-func NewIsolatedSingleFileAtExpecting(filePath string, line, col int, parentID, fileID string) (*App, error) {
-	want, err := parseIsolatedExpectation(parentID, fileID)
+// NewIsolatedSingleFileAtExpecting is the --single-file-at receiver of handoff
+// contract v3: a dedicated link/edit pane at a 1-based location that neither
+// accepts shared open/debug requests nor loads/publishes shared editor state.
+// filePath must be absolute and normalized and is never resolved. Before any
+// screen exists, ReceiveHandoff binds filePath relative to its held parent with
+// O_NOFOLLOW, requires the held parent and original to be exactly parentID and
+// fileID, and creates handoffDir/ack; only then is the UI started and the tab
+// registered. Any failure (swap, mismatch, read-only preview, invalidated
+// HANDOFF) fails closed: nil app, an error, no tab, no writes.
+func NewIsolatedSingleFileAtExpecting(filePath string, line, col int, parentID, fileID, handoffDir string) (*App, error) {
+	tab, err := ReceiveHandoff(filePath, parentID, fileID, handoffDir)
 	if err != nil {
 		return nil, err
 	}
-	return newSingleFileAt(filePath, line, col, true, want)
+	return newSingleFileAt(filePath, line, col, true, tab)
 }
 
 // newSingleFileAt establishes channel ownership before bootstrap or opening a tab.
 // Isolated panes keep breakpoint/debug models local, without shared persistence.
-// expect, when non-nil, applies only to this initial open (see openFile).
-func newSingleFileAt(filePath string, line, col int, isolated bool, expect *isolatedExpectation) (*App, error) {
+// bound, when non-nil, is the receiver's acknowledged tab for filePath; it is
+// registered instead of loading filePath again (see openFile).
+func newSingleFileAt(filePath string, line, col int, isolated bool, bound *editor.Tab) (*App, error) {
 	th := theme.Default()
 	scr, err := newScreen(th)
 	if err != nil {
+		if bound != nil {
+			_ = bound.Close()
+		}
 		return nil, err
 	}
 
@@ -824,10 +821,10 @@ func newSingleFileAt(filePath string, line, col int, isolated bool, expect *isol
 	}
 
 	a := &App{
-		screen:   scr,
-		theme:    th,
-		isolated: isolated,
-		expect:   expect,
+		screen:     scr,
+		theme:      th,
+		isolated:   isolated,
+		initialTab: bound,
 		// Absolute for the same reason as above; single-file mode has no tree to borrow it from.
 		rootDir:        absOr(rootDir),
 		lastDebugSeq:   debugRequestFloor,
@@ -850,7 +847,13 @@ func newSingleFileAt(filePath string, line, col int, isolated bool, expect *isol
 	// the whole-repo status or tree walk that New performs.
 	err = a.openFileAt(filePath, line, col)
 	// One-shot: later explicit navigation opens other files in other parents.
-	a.expect = nil
+	if a.initialTab != nil {
+		_ = a.initialTab.Close()
+		a.initialTab = nil
+		if err == nil {
+			err = fmt.Errorf("bound tab for %s was not registered", filePath)
+		}
+	}
 	if err != nil {
 		a.Close()
 		return nil, err
@@ -1235,6 +1238,8 @@ func (a *App) handleEvent(ev tcell.Event) {
 		a.flash(e.msg)
 	case *customActionDoneEvent:
 		a.handleCustomActionDone(e)
+	case *explorerOpenDoneEvent:
+		a.handleExplorerOpenDone(e)
 	case *formatDoneEvent:
 		a.handleFormatDone(e)
 	case *finderRebuiltEvent:
@@ -2429,6 +2434,19 @@ func (a *App) openFile(path string) error {
 			return nil
 		}
 	}
+	// The handoff receiver's tab was already bound, checked and acknowledged
+	// for exactly this path; register THAT object instead of loading again.
+	if t := a.initialTab; t != nil {
+		a.initialTab = nil
+		if t.Path != path {
+			_ = t.Close()
+			err := fmt.Errorf("cannot open %s: bound tab is for %s", path, t.Path)
+			a.flash(fmt.Sprintf("Error: %v", err))
+			return err
+		}
+		a.registerTab(t)
+		return nil
+	}
 	t, err := editor.NewTab(path)
 	if err != nil {
 		a.flash(fmt.Sprintf("Error: %v", err))
@@ -2443,17 +2461,14 @@ func (a *App) openFile(path string) error {
 			return err
 		}
 	}
-	// A caller-verified parent and original must be the ones actually HELD,
-	// checked before the tab is registered or handed to git/LSP. Unbound
-	// previews fail.
-	if a.isolated && a.expect != nil {
-		if err := checkExpected(t, *a.expect); err != nil {
-			_ = t.Close()
-			err = fmt.Errorf("cannot open %s: %w", path, err)
-			a.flash(fmt.Sprintf("Error: %v", err))
-			return err
-		}
-	}
+	a.registerTab(t)
+	return nil
+}
+
+// registerTab makes an opened (and, if isolated, bound) tab active and only
+// then hands it to git and the LSP.
+func (a *App) registerTab(t *editor.Tab) {
+	path := t.Path
 	a.tabs = append(a.tabs, t)
 	a.activeTab = len(a.tabs) - 1
 	a.refreshTabGitState(t)
@@ -2461,7 +2476,6 @@ func (a *App) openFile(path string) error {
 	// is what actually starts the flow. It also spawns the server on the first file of a language.
 	a.lspDidOpen(t.Path, t.Buffer.String())
 	a.flash(fmt.Sprintf("Opened %s", filepath.Base(path)))
-	return nil
 }
 
 // saveActiveTab writes the active tab's buffer to disk.

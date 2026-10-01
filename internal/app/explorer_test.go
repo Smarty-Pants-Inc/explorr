@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 )
@@ -46,6 +47,7 @@ func TestOpenFileInHerdRSplitIgnoresAmbientScope(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			log := fakeExplorerHerdR(t, `case "$1:$2" in
   pane:split) printf '%s\n' '{"result":{"pane":{"pane_id":"wA:p8","workspace_id":"wA","tab_id":"wA:t1"}}}' ;;
+  pane:run) h=${4##*"--handoff '"}; h=${h%"'"}; : > "$h/ack"; printf '%s\n' '{"result":{}}' ;;
   *) printf '%s\n' '{"result":{}}' ;;
 esac
 `)
@@ -54,6 +56,9 @@ esac
 			t.Setenv("HERDR_TAB_ID", tc.tab)
 			t.Setenv("HERDR_PLUGIN_CONTEXT_JSON", `{"focused_pane_id":"`+tc.focusedPane+`"}`)
 			file := filepath.Join(t.TempDir(), "file.go")
+			if err := os.WriteFile(file, []byte("package f\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
 			if err := OpenFileInHerdRSplit(file, 1, 1); err != nil {
 				t.Fatal(err)
 			}
@@ -89,7 +94,11 @@ func TestOpenFileInHerdRSplitStaleOriginDoesNotRetry(t *testing.T) {
 	log := fakeExplorerHerdR(t, "printf '%s\\n' 'pane_not_found: originating pane closed' >&2\nexit 1\n")
 	t.Setenv("HERDR_PANE_ID", "wA:p7")
 	t.Setenv("HERDR_WORKSPACE_ID", "wB")
-	if err := OpenFileInHerdRSplit("file.go", 1, 1); err == nil || !strings.Contains(err.Error(), "originating pane closed") {
+	file := filepath.Join(t.TempDir(), "file.go")
+	if err := os.WriteFile(file, []byte("package f\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := OpenFileInHerdRSplit(file, 1, 1); err == nil || !strings.Contains(err.Error(), "originating pane closed") {
 		t.Fatalf("stale origin error = %v", err)
 	}
 	calls, err := os.ReadFile(log)
@@ -106,6 +115,7 @@ func TestOpenFileInHerdRSplitStaleOriginDoesNotRetry(t *testing.T) {
 func TestExplorerActivationUsesOwnPane(t *testing.T) {
 	log := fakeExplorerHerdR(t, `case "$1:$2" in
   pane:split) printf '%s\n' '{"result":{"pane":{"pane_id":"wA:p8"}}}' ;;
+  pane:run) h=${4##*"--handoff '"}; h=${h%"'"}; : > "$h/ack"; printf '%s\n' '{"result":{}}' ;;
   *) printf '%s\n' '{"result":{}}' ;;
 esac
 `)
@@ -122,6 +132,9 @@ esac
 	a.tree.Focus(root, a.treeListHeight())
 	a.handleTreeKey(keyEv(tcell.KeyDown, 0))
 	a.handleTreeKey(keyEv(tcell.KeyEnter, 0))
+	if done := waitExplorerDone(t, a); done.err != nil {
+		t.Fatalf("explorer handoff: %v", done.err)
+	}
 	if a.confirmOpen || !a.tree.Focused || a.tree.ActiveFile != file || len(a.tabs) != 0 {
 		t.Fatalf("activation failed: modal=%v focused=%v active=%q tabs=%d", a.confirmOpen, a.tree.Focused, a.tree.ActiveFile, len(a.tabs))
 	}
@@ -129,7 +142,7 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(string(calls), "pane split --pane wA:p7 --direction right --cwd "+root+" --no-focus\n") || !strings.Contains(string(calls), " --single-file-at "+shellQuote(file)+" 1 1") {
+	if !strings.HasPrefix(string(calls), "pane split --pane wA:p7 --direction right --cwd "+root+" --no-focus\n") || !strings.Contains(string(calls), " --single-file-at "+shellQuote(file)+" 1 1 --expect-parent ") {
 		t.Fatalf("explorer launch = %q", calls)
 	}
 }
@@ -146,4 +159,20 @@ func TestExplorerMissingOriginShowsError(t *testing.T) {
 	if !a.confirmOpen || a.confirmTitle != "Could not open file" || !strings.Contains(strings.Join(a.confirmMessageLines, "\n"), "originating pane") || len(a.tabs) != 0 {
 		t.Fatalf("missing-origin modal = %v %q %q tabs=%d", a.confirmOpen, a.confirmTitle, a.confirmMessageLines, len(a.tabs))
 	}
+}
+
+// waitExplorerDone pumps the explorer's screen until the async handoff result
+// arrives, then handles it like the event loop does.
+func waitExplorerDone(t *testing.T, a *App) *explorerOpenDoneEvent {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		ev := a.screen.PollEvent()
+		if done, ok := ev.(*explorerOpenDoneEvent); ok {
+			a.handleEvent(done)
+			return done
+		}
+	}
+	t.Fatal("explorer never reported the handoff result")
+	return nil
 }

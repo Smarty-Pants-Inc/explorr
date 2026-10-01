@@ -107,7 +107,7 @@ func TestIsolatedExpectFileSameParentSwapFailsClosed(t *testing.T) {
 				t.Fatal("parent identity changed; this is not the same-parent swap")
 			}
 			before := isolatedPublisherSnapshot(t)
-			app, err := NewIsolatedSingleFileAtExpecting(a, 1, 1, parentID, fileID)
+			app, err := NewIsolatedSingleFileAtExpecting(a, 1, 1, parentID, fileID, t.TempDir())
 			if app != nil || err == nil {
 				if app != nil {
 					// Prove the harm the expectation must prevent, then fail.
@@ -117,8 +117,9 @@ func TestIsolatedExpectFileSameParentSwapFailsClosed(t *testing.T) {
 				}
 				t.Fatalf("same-parent swap %s appeared ready: app=%v error=%v", kind, app != nil, err)
 			}
-			if screen == nil || !screen.finalized {
-				t.Fatal("failed constructor did not release its screen")
+			if screen != nil {
+				// v3: the receiver binds, checks and acks BEFORE any screen exists.
+				t.Fatal("refused receiver created a screen")
 			}
 			isolatedPublisherAssertUnchanged(t, before)
 			isolatedSaveAssertBytes(t, b, "BBB\n")
@@ -137,7 +138,7 @@ func TestIsolatedExpectFileSameParentSwapFailsClosed(t *testing.T) {
 func TestIsolatedExpectFileMatchBinds(t *testing.T) {
 	isolatedReceiverEnvironment(t)
 	a, b, parentID, fileID := isolatedExpectFilePair(t)
-	app, err := NewIsolatedSingleFileAtExpecting(a, 1, 2, parentID, fileID)
+	app, err := NewIsolatedSingleFileAtExpecting(a, 1, 2, parentID, fileID, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +153,7 @@ func TestIsolatedExpectFileMatchBinds(t *testing.T) {
 	if got, err := tab.BoundFileID(); err != nil || got.String() != fileID {
 		t.Fatalf("bound file = %v, %v; want %s", got, err, fileID)
 	}
-	if app.expect != nil {
+	if app.initialTab != nil {
 		t.Fatal("expectation leaked past construction into later navigation")
 	}
 	tab.InsertString("X")
@@ -167,7 +168,7 @@ func TestIsolatedExpectFileMalformedRejected(t *testing.T) {
 	isolatedReceiverEnvironment(t)
 	a, _, parentID, fileID := isolatedExpectFilePair(t)
 	for _, ids := range [][2]string{{parentID, ""}, {parentID, "1:2:3"}, {"", fileID}, {"-1:2", fileID}} {
-		if app, err := NewIsolatedSingleFileAtExpecting(a, 1, 1, ids[0], ids[1]); app != nil || err == nil {
+		if app, err := NewIsolatedSingleFileAtExpecting(a, 1, 1, ids[0], ids[1], t.TempDir()); app != nil || err == nil {
 			if app != nil {
 				app.Close()
 			}
@@ -182,7 +183,7 @@ func TestIsolatedExpectFileMalformedRejected(t *testing.T) {
 func TestIsolatedExpectFileErrorNamesFileCheck(t *testing.T) {
 	isolatedReceiverEnvironment(t)
 	a, b, parentID, _ := isolatedExpectFilePair(t)
-	_, err := NewIsolatedSingleFileAtExpecting(a, 1, 1, parentID, isolatedExpectFileID(t, b))
+	_, err := NewIsolatedSingleFileAtExpecting(a, 1, 1, parentID, isolatedExpectFileID(t, b), t.TempDir())
 	if err == nil || !strings.Contains(err.Error(), "file identity") {
 		t.Fatalf("error = %v, want a file identity mismatch", err)
 	}

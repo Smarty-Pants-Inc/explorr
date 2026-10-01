@@ -25,7 +25,7 @@ index 6add628..6013362 100644
  tempfile = "3"
  
 diff --git a/src/app.rs b/src/app.rs
-index 49829b8..72cc54b 100644
+index 49829b8..acb4ef6 100644
 --- a/src/app.rs
 +++ b/src/app.rs
 @@ -8,7 +8,7 @@
@@ -55,13 +55,37 @@ index 49829b8..72cc54b 100644
      pub base: Option<String>,
      /// The `branch` scope's base outcome, carried by the latest landed snapshot — the
      /// header names its winner (or the skip) and the diff builds against the winner's OID
-@@ -656,6 +660,77 @@ impl App {
+@@ -634,8 +638,13 @@ pub struct App {
+     /// whole worktree moves it — herdr answered and git resolved every member's directory — so
+     /// `Some(false)` always means someone looked and found no member.
+     agents_present: Option<bool>,
++    /// How long Edit original waits for the editor's handoff ack (contract v3: 15 s).
++    pub(crate) handoff_ack_timeout: std::time::Duration,
+ }
+ 
++/// Handoff contract v3: the sender waits up to this long for `HANDOFF/ack`.
++const HANDOFF_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
++
+ /// One painted link region: `x_start..x_end` on screen row `y`, in absolute cells.
+ #[derive(Clone, Debug)]
+ struct PaintedLink {
+@@ -656,6 +665,87 @@ impl App {
          Self::build(repo, scope, base, true)
      }
  
 +    /// Review one exact file, independent of Git, with a durable comment snapshot.
 +    pub fn new_document(path: PathBuf, line: u32) -> Result<Self> {
-+        let (document, store) = crate::document::Document::open(&path)?;
++        Self::new_document_with(path, line, None)
++    }
++
++    /// [`Self::new_document`], bound to a sender's handoff when one was given: the
++    /// document is checked and acknowledged before any lock, sidecar, or UI exists.
++    pub fn new_document_with(
++        path: PathBuf,
++        line: u32,
++        handoff: Option<&crate::config::Handoff>,
++    ) -> Result<Self> {
++        let (document, store) = crate::document::Document::open_with(&path, handoff)?;
 +        let path = document.path();
 +        let file = path.to_str().context("document path is not UTF-8")?.to_owned();
 +        let repo = path.parent().context("document has no parent directory")?.to_path_buf();
@@ -133,7 +157,7 @@ index 49829b8..72cc54b 100644
      /// Construct the error-only reviewr pane without reading repository state.
      pub(crate) fn blocked(repo: PathBuf, scope: Scope, base: Option<String>) -> Self {
          Self::build(repo, scope, base, false)
-@@ -669,6 +744,7 @@ impl App {
+@@ -669,6 +759,7 @@ impl App {
          let theme = theme::resolve(None);
          Self {
              repo,
@@ -141,7 +165,15 @@ index 49829b8..72cc54b 100644
              base,
              branch_base: git::BaseStatus::default(),
              base_epoch: 0,
-@@ -840,6 +916,11 @@ impl App {
+@@ -752,6 +843,7 @@ impl App {
+             markdown_cache: std::cell::RefCell::new(crate::markdown::RenderCache::default()),
+             turn_baseline,
+             agents_present: None,
++            handoff_ack_timeout: HANDOFF_ACK_TIMEOUT,
+         }
+     }
+ 
+@@ -840,6 +932,11 @@ impl App {
      /// comments always survive; an in-progress draft keeps the exact frozen diff it was written
      /// against, matching the ordinary refresh invariant.
      pub(crate) fn carry_authored_state_from(&mut self, old: &mut Self) {
@@ -153,7 +185,7 @@ index 49829b8..72cc54b 100644
          self.store = std::mem::take(&mut old.store);
          self.list_cursor = old.list_cursor;
          // The footer expansion is one global toggle, carried regardless of the recovered mode
-@@ -867,8 +948,8 @@ impl App {
+@@ -867,8 +964,8 @@ impl App {
              // before the mode is stored, so none reaches recovery; the search query is not
              // restored and the picker's frozen rows are not either (specs/search.md,
              // specs/find-in-file.md, specs/herdr-host.md).
@@ -164,7 +196,7 @@ index 49829b8..72cc54b 100644
                  self.scope = old.scope;
                  self.tab = old.tab;
                  self.active_file_tab = old.active_file_tab;
-@@ -1015,6 +1096,9 @@ impl App {
+@@ -1015,6 +1112,9 @@ impl App {
      /// "a comment is never lost to a refresh" invariant (`specs/overview.md`).
      pub fn reload(&mut self) -> Result<()> {
          self.ensure_config_ready()?;
@@ -174,7 +206,7 @@ index 49829b8..72cc54b 100644
          // The PR tab holds its own state and renders nothing from the file tree, so a poll on
          // it skips the rebuild; switching back to a file tab reloads it then (specs/tui.md).
          if !self.tab.is_file_tab() {
-@@ -1073,6 +1157,9 @@ impl App {
+@@ -1073,6 +1173,9 @@ impl App {
      /// Reconcile a built snapshot into the view — the one place a world result touches place
      /// state, by identity first, then fallback, then clamp (`specs/overview.md` Continuity).
      pub fn reconcile_world(&mut self, snapshot: crate::world::WorldSnapshot) {
@@ -184,7 +216,7 @@ index 49829b8..72cc54b 100644
          // Keep the cursor on the same row target across the rebuild; fall back to the open
          // file, then the first file. The toggled-directory set survives untouched.
          let anchor = self.cursor_anchor();
-@@ -1132,6 +1219,12 @@ impl App {
+@@ -1132,6 +1235,12 @@ impl App {
      /// `previous_path`), the whole-file content in `All files`. The one place this dispatch lives,
      /// so opening a file from the tree and from a comment edit can't drift apart.
      fn open_path_in_tab(&mut self, path: String, previous_path: Option<String>) {
@@ -197,7 +229,7 @@ index 49829b8..72cc54b 100644
          match self.tab {
              Tab::AllFiles => self.set_file_view(&path),
              // `Changes` (the `PR` tab never opens a file in the read pane).
-@@ -1353,6 +1446,13 @@ impl App {
+@@ -1353,6 +1462,13 @@ impl App {
      /// `sample` rides the poll's status sample along; `reveal` re-reveals the cursor when
      /// the result lands, for user-initiated switches only (specs/tui.md).
      pub fn request_world_refresh(&mut self, sample_turn: bool, reveal: bool) {
@@ -211,7 +243,7 @@ index 49829b8..72cc54b 100644
          let request = self.world_request.get_or_insert(crate::world::WorldRequest::default());
          request.sample_turn |= sample_turn;
          request.reveal |= reveal;
-@@ -1818,6 +1918,9 @@ impl App {
+@@ -1818,6 +1934,9 @@ impl App {
      /// in progress is never stranded against a different diff.
      pub fn set_scope(&mut self, scope: Scope) -> Result<()> {
          self.ensure_config_ready()?;
@@ -221,7 +253,7 @@ index 49829b8..72cc54b 100644
          if self.scope != scope && !self.composing() {
              self.scope = scope;
              self.rebase_changes()?;
-@@ -1872,6 +1975,9 @@ impl App {
+@@ -1872,6 +1991,9 @@ impl App {
      /// Queue a PR refresh, merging into any request already pending: the stronger kind
      /// wins, so an ambient trigger can never downgrade the user's commanded refresh.
      pub fn request_pr_refresh(&mut self, kind: RefreshKind) {
@@ -231,7 +263,7 @@ index 49829b8..72cc54b 100644
          self.pr_pending = self.pr_pending.max(Some(kind));
      }
  
-@@ -1883,7 +1989,7 @@ impl App {
+@@ -1883,7 +2005,7 @@ impl App {
      /// stays on the same side.
      pub fn set_tab(&mut self, tab: Tab) -> Result<()> {
          self.ensure_config_ready()?;
@@ -240,7 +272,7 @@ index 49829b8..72cc54b 100644
              return Ok(());
          }
          self.tab = tab;
-@@ -2812,24 +2918,51 @@ impl App {
+@@ -2812,24 +2934,51 @@ impl App {
              self.cancel_comment();
              return;
          }
@@ -295,7 +327,7 @@ index 49829b8..72cc54b 100644
      /// Whether the selection has at least one content row a comment can attach to —
      /// a fold marker does not qualify.
      fn has_anchorable_selection(&self) -> bool {
-@@ -2948,7 +3081,11 @@ impl App {
+@@ -2948,7 +3097,11 @@ impl App {
          }
          if let Some(i) = self.target_comment() {
              logln!("comment delete [{i}]");
@@ -307,7 +339,7 @@ index 49829b8..72cc54b 100644
              self.clamp_list_cursor();
              self.status = "comment deleted".to_string();
              // Don't strand the user in an empty "Comments (0)" overlay, matching `export`.
-@@ -2982,6 +3119,82 @@ impl App {
+@@ -2982,6 +3135,96 @@ impl App {
          }
      }
  
@@ -349,6 +381,7 @@ index 49829b8..72cc54b 100644
 +        if self.preview_active() {
 +            self.return_from_preview();
 +        }
++        let ack_timeout = self.handoff_ack_timeout;
 +        let result = (|| {
 +            self.ensure_config_ready()?;
 +            let (file, line) = self.original_edit_target()?;
@@ -366,19 +399,32 @@ index 49829b8..72cc54b 100644
 +            // alone lets a same-parent symlink swap hand the editor a sibling file;
 +            // a symlinked, missing, or non-regular original is refused right here.
 +            let parent_id = document.parent_id()?;
-+            let file_id = document.file_id()?;
-+            let output = std::process::Command::new(helper)
++            // Contract v3: HOLD the identified original until the receiver acknowledges,
++            // so its inode (FILE_ID) cannot be reused by an unlink-and-recreate.
++            let held = document.file_id()?;
++            let handoff = crate::document::HandoffDir::create()?;
++            let launched = std::process::Command::new(helper)
 +                .arg(file)
 +                .arg(line.to_string())
 +                .arg("1")
 +                .arg(parent_id)
-+                .arg(file_id)
++                .arg(held.id())
++                .arg(handoff.path())
 +                .output()
-+                .context("launching original editor")?;
-+            if !output.status.success() {
-+                bail!("original editor failed: {}", String::from_utf8_lossy(&output.stderr).trim());
-+            }
-+            Ok(())
++                .context("launching original editor");
++            let outcome = match launched {
++                Err(error) => Err(error),
++                Ok(output) if !output.status.success() => Err(anyhow::anyhow!(
++                    "original editor failed: {}",
++                    String::from_utf8_lossy(&output.stderr).trim()
++                )),
++                Ok(_) if handoff.wait_for_ack(ack_timeout) => Ok(()),
++                Ok(_) => Err(anyhow::anyhow!("the editor did not confirm it opened the file")),
++            };
++            // ALWAYS: invalidate HANDOFF, then release the original, then remove it.
++            let closed = handoff.close(held);
++            outcome?;
++            closed
 +        })();
 +        match &result {
 +            Ok(()) => self.status = "opened original in editor".to_string(),
@@ -390,7 +436,7 @@ index 49829b8..72cc54b 100644
      // --- Search overlay (specs/search.md) ------------------------------------------------
  
      /// The active scope's annotation for `path` — the search overlay's file rows wear the
-@@ -2992,6 +3205,9 @@ impl App {
+@@ -2992,6 +3235,9 @@ impl App {
  
      /// `/`: open the search screen, from any tab, from either pane (specs/search.md).
      pub fn open_search(&mut self) {
@@ -400,7 +446,7 @@ index 49829b8..72cc54b 100644
          // A navigator-divider drag held from the review view must not become a search-split
          // resize: cancel it so its remaining drag events are consumed, not acted on — the
          // search divider only drags a gesture it started itself (specs/input.md).
-@@ -3275,6 +3491,9 @@ impl App {
+@@ -3275,6 +3521,9 @@ impl App {
      /// pick lands the cursor on its line, clamped into the file's current length. A
      /// vanished path opens nothing and the screen stays (specs/search.md).
      pub fn search_open_pick(&mut self) -> Result<()> {
@@ -410,7 +456,7 @@ index 49829b8..72cc54b 100644
          let Some(s) = self.search.as_ref() else { return Ok(()) };
          // Off `Ready`, the painted screen shows no rows — held results are stale and
          // invisible, so nothing opens (specs/search.md).
-@@ -3554,6 +3773,20 @@ impl App {
+@@ -3554,6 +3803,20 @@ impl App {
              out.push((A::MoveFile, Move));
              out.push((A::MovePage, Move));
          }
@@ -431,7 +477,7 @@ index 49829b8..72cc54b 100644
          out
      }
  
-@@ -3643,7 +3876,10 @@ impl App {
+@@ -3643,7 +3906,10 @@ impl App {
      /// `--base` flag (`specs/input.md` Base picker).
      #[must_use]
      pub fn base_pick_available(&self) -> bool {
@@ -443,7 +489,7 @@ index 49829b8..72cc54b 100644
      }
  
      /// Open the base picker: one row per branch name, the open PR's target starred first,
-@@ -3765,7 +4001,9 @@ impl App {
+@@ -3765,7 +4031,9 @@ impl App {
          logln!("export ({n}) -> {} ::\n{text}", target.label());
          let delivered = match target.export(&text) {
              Ok(()) => {
@@ -454,7 +500,7 @@ index 49829b8..72cc54b 100644
                  self.status = target.success_message(n);
                  logln!("export OK");
                  true
-@@ -3923,6 +4161,11 @@ fn hunk_row(rows: &[Row], from: Option<usize>, forward: bool) -> Option<usize> {
+@@ -3923,6 +4191,11 @@ fn hunk_row(rows: &[Row], from: Option<usize>, forward: bool) -> Option<usize> {
      }
  }
  
@@ -466,7 +512,7 @@ index 49829b8..72cc54b 100644
  /// Whether `path` names a markdown file: a `.md`/`.markdown` extension,
  /// case-insensitive (specs/diff-view.md).
  fn is_markdown_path(path: &str) -> bool {
-@@ -4166,6 +4409,626 @@ mod tests {
+@@ -4166,6 +4439,785 @@ mod tests {
          assert_eq!(recovered.focus, crate::Focus::Diff, "and focus lands on the read pane");
      }
  
@@ -819,13 +865,13 @@ index 49829b8..72cc54b 100644
 +        let mut app = App::new_document(path.clone(), 1).unwrap();
 +        app.move_cursor(1).unwrap();
 +        let helper = dir.path().join("editor-helper");
-+        std::fs::write(&helper, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\n").unwrap();
++        std::fs::write(&helper, ACKING_HELPER).unwrap();
 +        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
 +        launch_recording_helper(&mut app, &helper);
 +        let args = std::fs::read_to_string(dir.path().join("editor-helper.args")).unwrap();
 +        let canonical = path.canonicalize().unwrap();
 +        assert_eq!(
-+            args,
++            first_five_lines(&args),
 +            format!(
 +                "{}\n2\n1\n{}\n{}\n",
 +                canonical.display(),
@@ -846,6 +892,17 @@ index 49829b8..72cc54b 100644
 +        repo_app.visible =
 +            vec![crate::diff::Row::Deletion { old_no: 2, spans: Vec::new(), emphasis: Vec::new() }];
 +        assert!(repo_app.original_edit_target().is_err());
++    }
++
++    /// A helper that records argv and acknowledges the handoff like a real receiver.
++    #[cfg(unix)]
++    const ACKING_HELPER: &str =
++        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\n[ -d \"$6\" ] && : > \"$6/ack\"\nexit 0\n";
++
++    /// FILE LINE COL PARENT_ID FILE_ID of a recorded argv (HANDOFF is per launch).
++    #[cfg(unix)]
++    fn first_five_lines(args: &str) -> String {
++        args.lines().take(5).map(|line| format!("{line}\n")).collect()
 +    }
 +
 +    /// The cross-language PARENT_ID contract: unsigned decimal `DEV:INO` of a directory.
@@ -869,7 +926,7 @@ index 49829b8..72cc54b 100644
 +    fn recording_helper(dir: &std::path::Path) -> (PathBuf, PathBuf) {
 +        use std::os::unix::fs::PermissionsExt;
 +        let helper = dir.join("recording-helper");
-+        std::fs::write(&helper, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\n").unwrap();
++        std::fs::write(&helper, ACKING_HELPER).unwrap();
 +        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
 +        let args = dir.join("recording-helper.args");
 +        (helper, args)
@@ -983,7 +1040,7 @@ index 49829b8..72cc54b 100644
 +        launch_recording_helper(&mut app, &helper);
 +        let canonical = path.canonicalize().unwrap();
 +        assert_eq!(
-+            std::fs::read_to_string(args).unwrap(),
++            first_five_lines(&std::fs::read_to_string(args).unwrap()),
 +            format!(
 +                "{}\n1\n1\n{}\n{}\n",
 +                canonical.display(),
@@ -993,7 +1050,7 @@ index 49829b8..72cc54b 100644
 +        );
 +    }
 +
-+    /// Contract v2: the helper receives exactly FILE LINE 1 PARENT_ID FILE_ID, where
++    /// Contract v3: the helper receives exactly FILE LINE 1 PARENT_ID FILE_ID HANDOFF, where
 +    /// FILE is the unchanged canonical original and FILE_ID is that entry's own identity.
 +    #[cfg(unix)]
 +    #[test]
@@ -1008,7 +1065,7 @@ index 49829b8..72cc54b 100644
 +        assert_eq!(canonical, path, "FILE is the reviewed spelling, not a resolution");
 +        let recorded = std::fs::read_to_string(&args).unwrap();
 +        let argv: Vec<&str> = recorded.lines().collect();
-+        assert_eq!(argv.len(), 5, "exactly FILE LINE COL PARENT_ID FILE_ID: {argv:?}");
++        assert_eq!(argv.len(), 6, "exactly FILE LINE COL PARENT_ID FILE_ID HANDOFF: {argv:?}");
 +        assert_eq!(argv[0], canonical.to_str().unwrap());
 +        assert_eq!(argv[1], "1");
 +        assert_eq!(argv[2], "1");
@@ -1021,6 +1078,154 @@ index 49829b8..72cc54b 100644
 +        }
 +        assert_eq!(app.status, "opened original in editor");
 +        assert_eq!(std::fs::read_to_string(&sibling).unwrap(), "sibling-one\n");
++    }
++
++    /// A just-written `/bin/sh` helper running `body` (argv is `$1`..`$6`).
++    #[cfg(unix)]
++    fn script_helper(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
++        use std::os::unix::fs::PermissionsExt;
++        let helper = dir.join(name);
++        std::fs::write(&helper, format!("#!/bin/sh\n{body}\n")).unwrap();
++        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
++        helper
++    }
++
++    /// The system temp dir as the sender spells HANDOFF's parent (lexically normalized).
++    #[cfg(unix)]
++    fn handoff_root() -> PathBuf {
++        std::env::temp_dir().components().collect()
++    }
++
++    /// Contract v3: argv is exactly FILE LINE 1 PARENT_ID FILE_ID HANDOFF; HANDOFF is a
++    /// fresh private `explorr-handoff-*` directory under the temp dir, the ack is
++    /// awaited, and afterwards neither HANDOFF nor `HANDOFF.closed` remains.
++    #[cfg(unix)]
++    #[test]
++    fn edit_original_hands_off_with_exact_argv_and_removes_acked_handoff() {
++        let (root, path, mut app) = replaced_parent_fixture();
++        let parent = root.path().join("current");
++        let helper = script_helper(
++            root.path(),
++            "acking-helper",
++            r#"printf '%s\n' "$@" > "$0.args"; ls -ld "$6" | cut -c1-10 > "$0.mode"; : > "$6/ack""#,
++        );
++        launch_recording_helper(&mut app, &helper);
++        let recorded = std::fs::read_to_string(root.path().join("acking-helper.args")).unwrap();
++        let argv: Vec<&str> = recorded.lines().collect();
++        assert_eq!(argv.len(), 6, "exactly FILE LINE COL PARENT_ID FILE_ID HANDOFF: {argv:?}");
++        assert_eq!(argv[0], path.to_str().unwrap());
++        assert_eq!(argv[1], "1");
++        assert_eq!(argv[2], "1");
++        assert_eq!(argv[3], parent_id_of(&parent));
++        assert_eq!(argv[4], file_id_of(&path));
++        let handoff = std::path::Path::new(argv[5]);
++        assert!(handoff.is_absolute());
++        assert_eq!(handoff.parent(), Some(handoff_root().as_path()));
++        let name = handoff.file_name().unwrap().to_str().unwrap();
++        assert!(name.starts_with("explorr-handoff-") && name.len() > 20, "{name}");
++        let mode = std::fs::read_to_string(root.path().join("acking-helper.mode")).unwrap();
++        assert_eq!(mode.trim(), "drwx------", "HANDOFF existed, private, during the launch");
++        assert!(!handoff.exists(), "HANDOFF is removed after the ack");
++        assert!(!PathBuf::from(format!("{}.closed", handoff.display())).exists());
++        assert_eq!(app.status, "opened original in editor");
++    }
++
++    /// A helper that launches but whose editor never acknowledges: E times out with the
++    /// contract's error after invalidating and removing HANDOFF, and a late ack (the
++    /// editor finally binding after the sender released the original) cannot land.
++    #[cfg(unix)]
++    #[test]
++    fn edit_original_times_out_without_ack_and_invalidates_handoff() {
++        let (root, _path, mut app) = replaced_parent_fixture();
++        app.handoff_ack_timeout = std::time::Duration::from_millis(150);
++        let helper = script_helper(
++            root.path(),
++            "silent-helper",
++            r#"printf '%s\n' "$@" > "$0.args"; (sleep 0.6; touch "$6/ack"; echo $? > "$0.late") >/dev/null 2>&1 &"#,
++        );
++        let started = std::time::Instant::now();
++        let error = loop {
++            match app.edit_original_with(helper.as_os_str()) {
++                Err(error)
++                    if error.chain().any(|cause| {
++                        cause
++                            .downcast_ref::<std::io::Error>()
++                            .is_some_and(|io| io.kind() == std::io::ErrorKind::ExecutableFileBusy)
++                    }) =>
++                {
++                    std::thread::sleep(std::time::Duration::from_millis(10));
++                }
++                Err(error) => break format!("{error:#}"),
++                Ok(()) => panic!("an unacknowledged launch must fail"),
++            }
++        };
++        assert!(started.elapsed() >= std::time::Duration::from_millis(150));
++        assert_eq!(error, "the editor did not confirm it opened the file");
++        assert_eq!(
++            app.status,
++            "edit original failed: the editor did not confirm it opened the file"
++        );
++        let recorded = std::fs::read_to_string(root.path().join("silent-helper.args")).unwrap();
++        let handoff = PathBuf::from(recorded.lines().nth(5).unwrap());
++        let closed = PathBuf::from(format!("{}.closed", handoff.display()));
++        assert!(!handoff.exists() && !closed.exists(), "invalidated and removed");
++        let late = root.path().join("silent-helper.late");
++        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
++        while !late.exists() && std::time::Instant::now() < deadline {
++            std::thread::sleep(std::time::Duration::from_millis(20));
++        }
++        assert_ne!(std::fs::read_to_string(&late).unwrap().trim(), "0", "late ack refused");
++        assert!(!handoff.exists() && !closed.exists(), "a late ack recreates nothing");
++        assert_eq!(app.store.len(), 1);
++    }
++
++    /// A launch failure (non-zero helper, or a missing helper) still runs the three
++    /// close steps: no HANDOFF directory is left behind in the temp dir.
++    #[cfg(unix)]
++    #[test]
++    fn edit_original_launch_failure_removes_handoff() {
++        let (root, _path, mut app) = replaced_parent_fixture();
++        let helper = script_helper(
++            root.path(),
++            "failing-helper",
++            r#"printf '%s\n' "$@" > "$0.args"; echo split-unavailable >&2; exit 7"#,
++        );
++        let error = loop {
++            match app.edit_original_with(helper.as_os_str()) {
++                Err(error) if format!("{error:#}").contains("Text file busy") => {
++                    std::thread::sleep(std::time::Duration::from_millis(10));
++                }
++                Err(error) => break format!("{error:#}"),
++                Ok(()) => panic!("a failing helper must fail"),
++            }
++        };
++        assert!(error.contains("split-unavailable"), "{error}");
++        let recorded = std::fs::read_to_string(root.path().join("failing-helper.args")).unwrap();
++        let handoff = PathBuf::from(recorded.lines().nth(5).unwrap());
++        assert!(!handoff.exists());
++        assert!(!PathBuf::from(format!("{}.closed", handoff.display())).exists());
++    }
++
++    /// The security-1153 round-4 P2, end to end: inside the handoff window (after
++    /// identification, before the receiver binds) A is unlinked and recreated. The
++    /// sender still holds the identified inode, so the new A can never reuse FILE_ID.
++    #[cfg(unix)]
++    #[test]
++    fn edit_original_holds_identified_inode_across_the_handoff_window() {
++        let (root, path, mut app) = replaced_parent_fixture();
++        let helper = script_helper(
++            root.path(),
++            "racing-helper",
++            r#"printf '%s\n' "$@" > "$0.args"; unlink "$1"; printf 'new\n' > "$1"; ls -i "$1" > "$0.ino"; [ -d "$6" ] && : > "$6/ack"; exit 0"#,
++        );
++        launch_recording_helper(&mut app, &helper);
++        let recorded = std::fs::read_to_string(root.path().join("racing-helper.args")).unwrap();
++        let argv: Vec<&str> = recorded.lines().collect();
++        let held_ino = argv[4].split_once(':').unwrap().1;
++        let ls = std::fs::read_to_string(root.path().join("racing-helper.ino")).unwrap();
++        let new_ino = ls.split_whitespace().next().unwrap();
++        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\n");
++        assert_ne!(new_ino, held_ino, "the recreated A reused the identified FILE_ID");
 +    }
 +
 +    /// The security-1153 P2: the reviewed `A.md` replaced, inside the SAME held parent,
@@ -1094,41 +1299,102 @@ index 49829b8..72cc54b 100644
      fn blocked_app_rejects_normal_repository_work_without_panicking() {
          let mut app = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
 diff --git a/src/config.rs b/src/config.rs
-index 39baa9a..e4ceefc 100644
+index 39baa9a..ff5b146 100644
 --- a/src/config.rs
 +++ b/src/config.rs
-@@ -12,6 +12,10 @@ use std::time::Duration;
+@@ -12,6 +12,14 @@ use std::time::Duration;
  #[derive(Clone, Debug)]
  pub struct Config {
      pub repo: PathBuf,
 +    /// The canonical regular file selected explicitly by `--file` (never a repo fallback).
++    /// With a [`Handoff`] it is instead the sender's exact, unresolved spelling.
 +    pub document: Option<PathBuf>,
++    /// The sender's identities and handoff directory (handoff contract v3), present only
++    /// when `--expect-parent`, `--expect-file` and `--handoff` were all given.
++    pub handoff: Option<Handoff>,
 +    /// One-based initial source line; defaults to 1.
 +    pub document_line: u32,
      pub poll: Duration,
      pub base: Option<String>,
      pub theme: Option<String>,
-@@ -27,8 +31,13 @@ impl Config {
+@@ -22,13 +30,70 @@ pub struct Config {
+     pub plugin_config_dir: Option<PathBuf>,
+ }
+ 
++/// What a launching sender identified and holds (handoff contract v3): the receiver binds
++/// `--file` through its parent, requires both identities, then creates `dir/ack`.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct Handoff {
++    /// `DEV:INO` the held parent directory of the document must have.
++    pub parent: String,
++    /// `DEV:INO` the document, opened through that held parent, must have.
++    pub file: String,
++    /// The sender's private per-launch directory; `ack` is created inside it.
++    pub dir: PathBuf,
++}
++
++/// The contract's identity grammar `^[0-9]+:[0-9]+$`, each half an unsigned 64-bit value.
++fn is_identity(value: &str) -> bool {
++    value.split_once(':').is_some_and(|(dev, ino)| {
++        [dev, ino].iter().all(|part| {
++            !part.is_empty()
++                && part.bytes().all(|b| b.is_ascii_digit())
++                && part.parse::<u64>().is_ok()
++        })
++    })
++}
++
++/// An absolute path with no `.`, `..`, empty (`//`) or trailing-slash component: the one
++/// spelling a sender passes, which receivers bind without resolving it again.
++pub(crate) fn normalized_absolute(path: &str) -> bool {
++    path.strip_prefix('/').is_some_and(|rest| {
++        rest.split('/').all(|part| !part.is_empty() && part != "." && part != "..")
++    })
++}
++
++/// Take one handoff option's value exactly once, validated by `valid`.
++fn handoff_value(
++    slot: &mut Option<String>,
++    flag: &str,
++    value: Option<String>,
++    valid: fn(&str) -> bool,
++    expected: &str,
++) -> anyhow::Result<()> {
++    anyhow::ensure!(slot.is_none(), "{flag} may only be supplied once");
++    let value = value.ok_or_else(|| anyhow::anyhow!("{flag} requires {expected}"))?;
++    anyhow::ensure!(valid(&value), "{flag} requires {expected}: {value}");
++    *slot = Some(value);
++    Ok(())
++}
++
+ impl Config {
+     /// Parse `args` (the process arguments *after* argv\[0\]).
      ///
      /// Recognises `--poll <ms>` (min 200, default 2000), `--base <ref>`,
      /// `--theme <name>`, and `--wrap on|off`; the first non-flag token is the repo path.
 -    pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Self {
 +    /// `--file <absolute-path>` opens exactly one regular file, with optional `--line <positive>`.
++    /// `--expect-parent DEV:INO --expect-file DEV:INO --handoff DIR` (all or none, each
++    /// once, only with `--file`) select handoff mode: FILE is then never canonicalized and
++    /// must already be absolute and normalized; the document binding checks the rest.
 +    /// Invalid document arguments fail before terminal setup instead of choosing a repository.
 +    pub fn parse<I: IntoIterator<Item = String>>(args: I) -> anyhow::Result<Self> {
          let mut repo: Option<PathBuf> = None;
-+        let mut document: Option<PathBuf> = None;
++        let mut file: Option<PathBuf> = None;
++        let mut expect_parent: Option<String> = None;
++        let mut expect_file: Option<String> = None;
++        let mut handoff_dir: Option<String> = None;
 +        let mut document_line = 1;
 +        let mut line_given = false;
          let mut poll_ms: u64 = 2000;
          let mut base: Option<String> = None;
          let mut theme: Option<String> = None;
-@@ -36,6 +45,42 @@ impl Config {
+@@ -36,6 +101,57 @@ impl Config {
          let mut it = args.into_iter();
          while let Some(arg) = it.next() {
              match arg.as_str() {
 +                "--file" => {
-+                    anyhow::ensure!(document.is_none(), "--file may only be supplied once");
++                    anyhow::ensure!(file.is_none(), "--file may only be supplied once");
 +                    let value = it
 +                        .next()
 +                        .ok_or_else(|| anyhow::anyhow!("--file requires an absolute file path"))?;
@@ -1138,16 +1404,31 @@ index 39baa9a..e4ceefc 100644
 +                        "--file requires an absolute file path: {}",
 +                        path.display()
 +                    );
-+                    let canonical = path
-+                        .canonicalize()
-+                        .map_err(|error| anyhow::anyhow!("--file {}: {error}", path.display()))?;
-+                    anyhow::ensure!(
-+                        canonical.is_file(),
-+                        "--file must name a regular file: {}",
-+                        path.display()
-+                    );
-+                    document = Some(canonical);
++                    // Resolution (or its refusal in handoff mode) waits until every
++                    // option is known, since the triple may follow --file.
++                    file = Some(path);
 +                }
++                "--expect-parent" => handoff_value(
++                    &mut expect_parent,
++                    "--expect-parent",
++                    it.next(),
++                    is_identity,
++                    "a DEV:INO identity",
++                )?,
++                "--expect-file" => handoff_value(
++                    &mut expect_file,
++                    "--expect-file",
++                    it.next(),
++                    is_identity,
++                    "a DEV:INO identity",
++                )?,
++                "--handoff" => handoff_value(
++                    &mut handoff_dir,
++                    "--handoff",
++                    it.next(),
++                    normalized_absolute,
++                    "an absolute normalized directory path",
++                )?,
 +                "--line" => {
 +                    anyhow::ensure!(!line_given, "--line may only be supplied once");
 +                    line_given = true;
@@ -1166,10 +1447,46 @@ index 39baa9a..e4ceefc 100644
                  "--poll" => {
                      if let Some(v) = it.next() {
                          poll_ms = v.parse().unwrap_or(poll_ms);
-@@ -48,20 +93,27 @@ impl Config {
+@@ -48,20 +164,64 @@ impl Config {
                  _ => {}
              }
          }
++        let handoff = match (expect_parent, expect_file, handoff_dir) {
++            (None, None, None) => None,
++            (Some(parent), Some(file), Some(dir)) => {
++                Some(Handoff { parent, file, dir: PathBuf::from(dir) })
++            }
++            _ => anyhow::bail!(
++                "--expect-parent, --expect-file and --handoff must be supplied together"
++            ),
++        };
++        anyhow::ensure!(
++            handoff.is_none() || file.is_some(),
++            "--expect-parent, --expect-file and --handoff require --file"
++        );
++        let document = match file {
++            None => None,
++            Some(path) if handoff.is_some() => {
++                // The sender resolved FILE once; never resolve it again here.
++                anyhow::ensure!(
++                    path.to_str().is_some_and(normalized_absolute),
++                    "--file must be absolute and normalized with --handoff: {}",
++                    path.display()
++                );
++                Some(path)
++            }
++            Some(path) => {
++                let canonical = path
++                    .canonicalize()
++                    .map_err(|error| anyhow::anyhow!("--file {}: {error}", path.display()))?;
++                anyhow::ensure!(
++                    canonical.is_file(),
++                    "--file must name a regular file: {}",
++                    path.display()
++                );
++                Some(canonical)
++            }
++        };
 +        anyhow::ensure!(!line_given || document.is_some(), "--line requires --file");
 +        anyhow::ensure!(
 +            document.is_none() || repo.is_none(),
@@ -1181,6 +1498,7 @@ index 39baa9a..e4ceefc 100644
 +        Ok(Self {
              repo,
 +            document,
++            handoff,
 +            document_line,
              poll: Duration::from_millis(poll_ms.max(200)),
              base,
@@ -1198,7 +1516,7 @@ index 39baa9a..e4ceefc 100644
          Self::parse(std::env::args().skip(1))
      }
  }
-@@ -605,7 +657,7 @@ mod tests {
+@@ -605,7 +765,7 @@ mod tests {
      use std::time::Duration;
  
      fn parse(args: &[&str]) -> Config {
@@ -1207,7 +1525,7 @@ index 39baa9a..e4ceefc 100644
      }
  
      #[test]
-@@ -615,6 +667,64 @@ mod tests {
+@@ -615,6 +775,173 @@ mod tests {
          assert_eq!(c.base, None);
      }
  
@@ -1255,6 +1573,115 @@ index 39baa9a..e4ceefc 100644
 +        }
 +    }
 +
++    /// Handoff contract v3: `--expect-parent P --expect-file F --handoff H` come all
++    /// together (any order, each once) or not at all, and only with `--file`.
++    #[test]
++    fn handoff_triple_is_all_or_nothing_and_well_formed() {
++        let dir = tempfile::tempdir().unwrap();
++        let root = dir.path().canonicalize().unwrap();
++        let file = root.join("doc.md");
++        std::fs::write(&file, "text").unwrap();
++        let file = file.to_str().unwrap();
++        let handoff = root.join("explorr-handoff-x");
++        let handoff = handoff.to_str().unwrap();
++        let triple = ["--expect-parent", "1:2", "--expect-file", "3:4", "--handoff", handoff];
++        let ok = |args: &[&str]| Config::parse(args.iter().map(|s| (*s).to_string()));
++        let mut full = vec!["--file", file];
++        full.extend(triple);
++        let parsed = ok(&full).unwrap();
++        assert_eq!(
++            parsed.handoff,
++            Some(super::Handoff {
++                parent: "1:2".into(),
++                file: "3:4".into(),
++                dir: std::path::PathBuf::from(handoff),
++            })
++        );
++        assert_eq!(parsed.document.as_deref(), Some(std::path::Path::new(file)));
++        assert!(parse(&["--file", file]).handoff.is_none());
++        // With the triple FILE is never resolved here: a symlink stays its own spelling
++        // (the document binding then refuses it) and existence is checked only there.
++        let link = root.join("link.md");
++        #[cfg(unix)]
++        std::os::unix::fs::symlink("doc.md", &link).unwrap();
++        let mut linked = vec!["--file", link.to_str().unwrap()];
++        linked.extend(triple);
++        assert_eq!(ok(&linked).unwrap().document, Some(link.clone()));
++        // Any order, with --line anywhere.
++        let reordered = [
++            "--handoff",
++            handoff,
++            "--line",
++            "2",
++            "--expect-file",
++            "3:4",
++            "--file",
++            file,
++            "--expect-parent",
++            "1:2",
++        ];
++        assert!(ok(&reordered).is_ok());
++        let mut cases: Vec<Vec<&str>> = Vec::new();
++        // Every partial subset of the triple.
++        for mask in 1..7_u8 {
++            let mut args = vec!["--file", file];
++            for (i, pair) in triple.chunks(2).enumerate() {
++                if mask & (1 << i) != 0 {
++                    args.extend(pair);
++                }
++            }
++            cases.push(args);
++        }
++        // Duplicates, missing values, malformed identities and handoffs.
++        for (flag, value) in
++            [("--expect-parent", "1:2"), ("--expect-file", "3:4"), ("--handoff", handoff)]
++        {
++            let mut args = full.clone();
++            args.extend([flag, value]);
++            cases.push(args);
++            let mut missing = vec!["--file", file];
++            missing.extend(triple);
++            let position = missing.iter().position(|arg| *arg == flag).unwrap();
++            missing.remove(position + 1);
++            cases.push(missing);
++        }
++        for bad in
++            ["", "1", "a:b", "1:2:3", "-1:2", "+1:2", " 1:2", "1:", ":2", "18446744073709551616:1"]
++        {
++            for flag in ["--expect-parent", "--expect-file"] {
++                let mut args = full.clone();
++                let position = args.iter().position(|arg| *arg == flag).unwrap();
++                args[position + 1] = bad;
++                cases.push(args);
++            }
++        }
++        let relative = "explorr-handoff-x";
++        let dotted = format!("{}/./explorr-handoff-x", root.display());
++        let parent = format!("{}/sub/../explorr-handoff-x", root.display());
++        let doubled = format!("{}//explorr-handoff-x", root.display());
++        let trailing = format!("{handoff}/");
++        for bad in [relative, dotted.as_str(), parent.as_str(), doubled.as_str(), trailing.as_str()]
++        {
++            let mut args = full.clone();
++            let position = args.iter().position(|arg| *arg == "--handoff").unwrap();
++            args[position + 1] = bad;
++            cases.push(args);
++        }
++        // The triple requires --file, and FILE must already be absolute and normalized.
++        cases.push(triple.to_vec());
++        let dotted_file = format!("{}/./doc.md", root.display());
++        let doubled_file = format!("{}//doc.md", root.display());
++        let up_file = format!("{}/x/../doc.md", root.display());
++        for bad in ["doc.md", dotted_file.as_str(), doubled_file.as_str(), up_file.as_str()] {
++            let mut args = vec!["--file", bad];
++            args.extend(triple);
++            cases.push(args);
++        }
++        for args in cases {
++            assert!(ok(&args).is_err(), "{args:?}");
++        }
++    }
++
 +    #[test]
 +    #[cfg(unix)]
 +    fn document_symlink_resolves_to_its_canonical_regular_file() {
@@ -1274,34 +1701,40 @@ index 39baa9a..e4ceefc 100644
          let c = parse(&["--poll", "500", "--base", "origin/dev", "/tmp/work"]);
 diff --git a/src/document.rs b/src/document.rs
 new file mode 100644
-index 0000000..0fdb4f0
+index 0000000..bf973bd
 --- /dev/null
 +++ b/src/document.rs
-@@ -0,0 +1,1272 @@
+@@ -0,0 +1,1610 @@
 +//! Single-document comment snapshots, separate from the git review model.
 +//!
 +//! The approved document-mode contract persists the seven fields in
 +//! `specs/review-model.md` beside the canonical original, without modifying it.
 +
 +#[cfg(unix)]
-+pub use unix::Document;
++pub use unix::{Document, HandoffDir, HeldOriginal};
 +
 +#[cfg(unix)]
 +mod unix {
 +    use std::ffi::OsStr;
 +    use std::fs::File;
++    use std::hash::{BuildHasher, Hasher};
 +    use std::io::{self, Read, Write};
++    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 +    use std::path::{Path, PathBuf};
 +    use std::sync::atomic::{AtomicU64, Ordering};
++    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 +
 +    use anyhow::{Context, Result, bail};
 +    use rustix::fs::{self as rfs, AtFlags, FileType, Mode, OFlags, Stat};
 +    use rustix::io::Errno;
 +    use serde::{Deserialize, Serialize};
 +
++    use crate::config::{Handoff, normalized_absolute};
 +    use crate::model::{Comment, CommentStore};
 +
 +    const SCHEMA_VERSION: u32 = 1;
++    /// Handoff contract v3: the sender polls for `HANDOFF/ack` this often.
++    const ACK_POLL: Duration = Duration::from_millis(20);
 +    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 +
 +    /// A canonical regular original and its single-writer sidecar lease.
@@ -1317,6 +1750,31 @@ index 0000000..0fdb4f0
 +        // Every sidecar operation uses this directory, not the mutable ancestor path.
 +        directory: File,
 +        lock: File,
++        // Handoff mode keeps holding the original it bound and acknowledged.
++        _bound_original: Option<File>,
++    }
++
++    /// The identified original, HELD open with its FILE_ID until the receiver has
++    /// acknowledged: no inode can be reused while any descriptor still references it.
++    #[derive(Debug)]
++    pub struct HeldOriginal {
++        _file: File,
++        id: String,
++    }
++
++    impl HeldOriginal {
++        /// The held original's FILE_ID (`DEV:INO` from fstat of the held descriptor).
++        pub fn id(&self) -> &str {
++            &self.id
++        }
++    }
++
++    /// The sender's private per-launch handoff directory (contract v3). It is only ever
++    /// closed through [`HandoffDir::close`], which invalidates it before releasing the
++    /// held original and then removes it.
++    #[derive(Debug)]
++    pub struct HandoffDir {
++        path: PathBuf,
 +    }
 +
 +    /// Only the agreed canonical snapshot fields are accepted or emitted.
@@ -1332,13 +1790,26 @@ index 0000000..0fdb4f0
 +        /// Resolve the original, acquire a nonblocking writer lock, and restore comments.
 +        /// Missing snapshots start empty; invalid existing snapshots are never repaired.
 +        pub fn open(path: &Path) -> Result<(Self, CommentStore)> {
-+            let path =
-+                path.canonicalize().with_context(|| format!("resolve {}", path.display()))?;
-+            path.to_str().context("document path is not UTF-8")?;
-+            let parent = path.parent().context("document has no parent directory")?;
-+            let directory = open_directory(parent)?;
-+            verify_parent(&directory, &path)?;
-+            regular_entry(&directory, &path)?.context("document is missing")?;
++            Self::open_with(path, None)
++        }
++
++        /// [`Self::open`], or with a sender's [`Handoff`]: bind the exact unresolved
++        /// spelling, require both identities and acknowledge BEFORE any lock or sidecar
++        /// exists, so every refusal leaves nothing written.
++        pub fn open_with(path: &Path, handoff: Option<&Handoff>) -> Result<(Self, CommentStore)> {
++            let (path, directory, bound_original) = if let Some(handoff) = handoff {
++                let (directory, original) = bind_handoff(path, handoff)?;
++                (path.to_path_buf(), directory, Some(original))
++            } else {
++                let path =
++                    path.canonicalize().with_context(|| format!("resolve {}", path.display()))?;
++                path.to_str().context("document path is not UTF-8")?;
++                let parent = path.parent().context("document has no parent directory")?;
++                let directory = open_directory(parent)?;
++                verify_parent(&directory, &path)?;
++                regular_entry(&directory, &path)?.context("document is missing")?;
++                (path, directory, None)
++            };
 +            let sidecar = append_suffix(&path, ".reviewr.json");
 +            let lock_path = append_suffix(&sidecar, ".lock");
 +            let lock = open_lock(&directory, &lock_path)?;
@@ -1347,7 +1818,7 @@ index 0000000..0fdb4f0
 +            })?;
 +            // Construct only after acquisition succeeds, but before fallible
 +            // validation, so every owned-lease exit explicitly unlocks it.
-+            let document = Self { path, sidecar, directory, lock };
++            let document = Self { path, sidecar, directory, lock, _bound_original: bound_original };
 +            check_opened_entry(&document.directory, &lock_path, &document.lock)?;
 +            let snapshot = read_snapshot(&document.directory, &document.sidecar, &document.path)?;
 +            document.verify_location()?;
@@ -1455,11 +1926,12 @@ index 0000000..0fdb4f0
 +            Ok(format_parent_id(&stat))
 +        }
 +
-+        /// The original's own identity per the cross-language FILE_ID contract: the
++        /// Identify and HOLD the original per the cross-language FILE_ID contract: the
 +        /// basename opened relative to the HELD parent with NOFOLLOW (so a symlink is
-+        /// refused, never resolved to a sibling), required regular, then fstat'd and
-+        /// formatted exactly like PARENT_ID. A FIFO never blocks the open.
-+        pub fn file_id(&self) -> Result<String> {
++        /// refused, never resolved to a sibling), required regular and still named by
++        /// that entry, then fstat'd and formatted exactly like PARENT_ID. A FIFO never
++        /// blocks the open. The caller keeps the result until the receiver acknowledges.
++        pub fn file_id(&self) -> Result<HeldOriginal> {
 +            self.verify_location()?;
 +            let fd = rfs::openat(
 +                &self.directory,
@@ -1474,7 +1946,8 @@ index 0000000..0fdb4f0
 +            if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
 +                bail!("refusing non-regular original: {}", self.path.display());
 +            }
-+            Ok(format_parent_id(&stat))
++            check_opened_entry(&self.directory, &self.path, &file)?;
++            Ok(HeldOriginal { id: format_parent_id(&stat), _file: file })
 +        }
 +
 +        /// Permit atomic replacement of the original, but never a different parent,
@@ -1494,6 +1967,159 @@ index 0000000..0fdb4f0
 +            // now rather than waiting for every duplicate to close; never unlink.
 +            let _ = self.lock.unlock();
 +        }
++    }
++
++    impl HandoffDir {
++        /// Create a fresh private `explorr-handoff-*` directory (mode 0700) under the
++        /// system temp dir, spelled absolute and normalized.
++        pub fn create() -> Result<Self> {
++            Self::create_in(&std::env::temp_dir())
++        }
++
++        /// mkdtemp-equivalent: an exclusive `mkdir` of an unpredictable name, retried
++        /// on collision; mkdir never follows or reuses an existing entry.
++        fn create_in(root: &Path) -> Result<Self> {
++            let root: PathBuf = root.components().collect();
++            for _ in 0..128 {
++                let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
++                hasher.write_u32(std::process::id());
++                hasher.write_u128(
++                    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos()),
++                );
++                hasher.write_u64(TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed));
++                let path = root.join(format!("explorr-handoff-{:016x}", hasher.finish()));
++                if !path.to_str().is_some_and(normalized_absolute) {
++                    bail!("temporary directory is not absolute and normalized: {}", root.display());
++                }
++                match std::fs::DirBuilder::new().mode(0o700).create(&path) {
++                    Ok(()) => return Ok(Self { path }),
++                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
++                    Err(error) => {
++                        return Err(error)
++                            .with_context(|| format!("create handoff {}", path.display()));
++                    }
++                }
++            }
++            bail!("could not create a unique handoff directory in {}", root.display())
++        }
++
++        /// The HANDOFF argument passed to the launch.
++        pub fn path(&self) -> &Path {
++            &self.path
++        }
++
++        /// Poll for the receiver's `ack` every 20 ms until `timeout`; true once it exists.
++        pub fn wait_for_ack(&self, timeout: Duration) -> bool {
++            let ack = self.path.join("ack");
++            let deadline = Instant::now() + timeout;
++            loop {
++                if std::fs::symlink_metadata(&ack).is_ok_and(|meta| meta.file_type().is_file()) {
++                    return true;
++                }
++                let now = Instant::now();
++                if now >= deadline {
++                    return false;
++                }
++                std::thread::sleep(ACK_POLL.min(deadline - now));
++            }
++        }
++
++        /// ALWAYS, in this order: (a) invalidate by renaming HANDOFF to `HANDOFF.closed`,
++        /// (b) release the held original, (c) remove the `.closed` directory. A late
++        /// receiver's ack-by-path then fails, so it can never confirm an open made after
++        /// the inode was released.
++        pub fn close(self, held: HeldOriginal) -> Result<()> {
++            self.close_with(held, |_| {})
++        }
++
++        /// [`Self::close`] with an observer run between invalidation and release.
++        fn close_with(self, held: HeldOriginal, invalidated: impl FnOnce(&Path)) -> Result<()> {
++            let closed = append_suffix(&self.path, ".closed");
++            let renamed = std::fs::rename(&self.path, &closed);
++            if renamed.is_err() {
++                // Still invalidate before releasing: never leave an ackable HANDOFF.
++                let _ = std::fs::remove_dir_all(&self.path);
++            }
++            invalidated(&closed);
++            drop(held);
++            // Remove only what we renamed, never a pre-existing `.closed` entry.
++            let removed = if renamed.is_ok() { std::fs::remove_dir_all(&closed) } else { Ok(()) };
++            renamed.with_context(|| format!("invalidate handoff {}", self.path.display()))?;
++            removed.with_context(|| format!("remove handoff {}", closed.display()))
++        }
++    }
++
++    /// Contract v3 receiver: bind the sender's exact FILE spelling through its held
++    /// parent (never resolving it), require PARENT_ID then FILE_ID, and acknowledge.
++    fn bind_handoff(path: &Path, handoff: &Handoff) -> Result<(File, File)> {
++        let spelled = path.to_str().context("document path is not UTF-8")?;
++        if !normalized_absolute(spelled) {
++            bail!("handoff document must be absolute and normalized: {}", path.display());
++        }
++        let parent = path.parent().context("document has no parent directory")?;
++        // NOFOLLOW: a parent spelled through a final symlink is refused, not resolved.
++        let directory = open_directory(parent)?;
++        let parent_id =
++            format_parent_id(&rfs::fstat(&directory).context("inspect held document parent")?);
++        if parent_id != handoff.parent {
++            bail!(
++                "document parent is not the expected directory: {} (expected {}, found {parent_id})",
++                parent.display(),
++                handoff.parent
++            );
++        }
++        // The bound spelling must also be the one every later location check accepts;
++        // this compares it, and never chooses what is bound.
++        verify_parent(&directory, path)?;
++        let fd = rfs::openat(
++            &directory,
++            entry_name(path)?,
++            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
++            Mode::empty(),
++        )
++        .with_context(|| format!("open document {}", path.display()))?;
++        let original = File::from(fd);
++        let stat = rfs::fstat(&original)
++            .with_context(|| format!("inspect document {}", path.display()))?;
++        if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
++            bail!("refusing non-regular original: {}", path.display());
++        }
++        let file_id = format_parent_id(&stat);
++        if file_id != handoff.file {
++            bail!(
++                "document is not the expected file: {} (expected {}, found {file_id})",
++                path.display(),
++                handoff.file
++            );
++        }
++        check_opened_entry(&directory, path, &original)?;
++        acknowledge(&handoff.dir)?;
++        Ok((directory, original))
++    }
++
++    /// Create `HANDOFF/ack` (O_CREAT|O_EXCL|O_WRONLY, 0600) by path, only in a private
++    /// real directory. An invalidated (renamed) HANDOFF or an existing ack refuses.
++    fn acknowledge(handoff: &Path) -> Result<()> {
++        let meta = std::fs::symlink_metadata(handoff)
++            .with_context(|| format!("handoff unavailable: {}", handoff.display()))?;
++        if !meta.file_type().is_dir() {
++            bail!("handoff is not a directory: {}", handoff.display());
++        }
++        if meta.mode() & 0o077 != 0 {
++            bail!("handoff directory is not private: {}", handoff.display());
++        }
++        let ack = handoff.join("ack");
++        let fd = rfs::open(
++            &ack,
++            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
++            Mode::RUSR | Mode::WUSR,
++        )
++        .with_context(|| format!("acknowledge handoff {}", ack.display()))?;
++        let created = rfs::fstat(&fd).with_context(|| format!("inspect {}", ack.display()))?;
++        if created.st_uid != meta.uid() {
++            bail!("handoff directory is not owned by this user: {}", handoff.display());
++        }
++        Ok(())
 +    }
 +
 +    /// Append to the entire filename, including its extension and non-UTF-8 spelling.
@@ -2455,7 +3081,7 @@ index 0000000..0fdb4f0
 +            let sibling = dir.path().join("B.md");
 +            fs::write(&sibling, b"sibling").unwrap();
 +            let (document, _) = Document::open(&path).unwrap();
-+            let first = document.file_id().unwrap();
++            let first = document.file_id().unwrap().id().to_owned();
 +            assert_eq!(first, id_of(&path));
 +            assert_ne!(first, id_of(&sibling));
 +            assert_ne!(first, document.parent_id().unwrap());
@@ -2465,7 +3091,7 @@ index 0000000..0fdb4f0
 +            fs::write(&temp, b"edited").unwrap();
 +            let replacement = id_of(&temp);
 +            fs::rename(&temp, &path).unwrap();
-+            let second = document.file_id().unwrap();
++            let second = document.file_id().unwrap().id().to_owned();
 +            assert_eq!(second, replacement);
 +            assert_ne!(second, first);
 +
@@ -2484,7 +3110,97 @@ index 0000000..0fdb4f0
 +            assert!(document.file_id().is_err(), "missing");
 +            assert_eq!(fs::read(&sibling).unwrap(), b"sibling");
 +            fs::write(&path, b"restored").unwrap();
-+            assert_eq!(document.file_id().unwrap(), id_of(&path));
++            assert_eq!(document.file_id().unwrap().id(), id_of(&path));
++        }
++
++        /// Round-4 P2: after identification, unlink A and create a new A. While the
++        /// identified file is held its inode cannot be reused, so the new A differs.
++        #[test]
++        fn identified_inode_is_not_reused_while_held() {
++            use std::os::unix::fs::MetadataExt;
++            let dir = tempfile::tempdir().unwrap();
++            let path = original(dir.path());
++            let (document, _) = Document::open(&path).unwrap();
++            let held = document.file_id().unwrap();
++            fs::remove_file(&path).unwrap();
++            fs::write(&path, b"replacement").unwrap();
++            let meta = fs::symlink_metadata(&path).unwrap();
++            let replacement = format!("{}:{}", meta.dev(), meta.ino());
++            assert_ne!(replacement, held.id(), "inode reused while the original was identified");
++            // Control: without a hold this filesystem may hand the number straight back.
++            // Informational only; it is not an error when the filesystem does not reuse.
++            let unheld = replacement;
++            fs::remove_file(&path).unwrap();
++            fs::write(&path, b"second replacement").unwrap();
++            let meta = fs::symlink_metadata(&path).unwrap();
++            let reused = format!("{}:{}", meta.dev(), meta.ino()) == unheld;
++            eprintln!("inode reuse without a hold on this filesystem: {reused}");
++            drop(held);
++        }
++
++        /// Close steps run in contract order: HANDOFF is already renamed to `.closed`
++        /// (so an ack by path fails) while the original is STILL held; afterwards the
++        /// held inode is released and the `.closed` directory is gone.
++        #[test]
++        fn handoff_close_invalidates_before_releasing_then_removes() {
++            use std::os::unix::fs::{MetadataExt, PermissionsExt};
++            let dir = tempfile::tempdir().unwrap();
++            let path = original(dir.path());
++            let (document, _) = Document::open(&path).unwrap();
++            let root = dir.path().canonicalize().unwrap();
++            let handoff = HandoffDir::create_in(&root).unwrap();
++            let created = fs::symlink_metadata(handoff.path()).unwrap();
++            assert!(created.file_type().is_dir());
++            assert_eq!(created.permissions().mode() & 0o777, 0o700);
++            let name = handoff.path().file_name().unwrap().to_str().unwrap().to_owned();
++            assert!(name.starts_with("explorr-handoff-"), "{name}");
++            let other = HandoffDir::create_in(&root).unwrap();
++            assert_ne!(other.path(), handoff.path(), "fresh per launch");
++            let held = document.file_id().unwrap();
++            let held_id = held.id().to_owned();
++            let spelled = handoff.path().to_path_buf();
++            let mut observed = false;
++            handoff
++                .close_with(held, |closed| {
++                    observed = true;
++                    assert!(!spelled.exists(), "HANDOFF invalidated first");
++                    assert!(closed.is_dir());
++                    assert!(acknowledge(&spelled).is_err(), "ack by path now fails");
++                    fs::remove_file(&path).unwrap();
++                    fs::write(&path, b"racer").unwrap();
++                    let meta = fs::symlink_metadata(&path).unwrap();
++                    assert_ne!(
++                        format!("{}:{}", meta.dev(), meta.ino()),
++                        held_id,
++                        "original still held during invalidation"
++                    );
++                })
++                .unwrap();
++            assert!(observed);
++            assert!(!spelled.exists());
++            assert!(!append_suffix(&spelled, ".closed").exists());
++            let held = document.file_id().unwrap();
++            other.close(held).unwrap();
++            assert_eq!(fs::read_dir(&root).unwrap().count(), 2, "original and its lock only");
++        }
++
++        /// A pre-existing `.closed` entry is never adopted or removed; HANDOFF itself is
++        /// still removed before release and the failure is reported.
++        #[test]
++        fn handoff_close_failure_still_removes_handoff() {
++            let dir = tempfile::tempdir().unwrap();
++            let path = original(dir.path());
++            let (document, _) = Document::open(&path).unwrap();
++            let root = dir.path().canonicalize().unwrap();
++            let handoff = HandoffDir::create_in(&root).unwrap();
++            let spelled = handoff.path().to_path_buf();
++            let squatter = append_suffix(&spelled, ".closed");
++            fs::write(&squatter, b"not ours").unwrap();
++            fs::write(spelled.join("ack"), b"").unwrap();
++            let error = handoff.close(document.file_id().unwrap()).unwrap_err();
++            assert!(format!("{error:#}").contains("invalidate handoff"), "{error:#}");
++            assert!(!spelled.exists(), "HANDOFF removed even though rename failed");
++            assert_eq!(fs::read(&squatter).unwrap(), b"not ours");
 +        }
 +
 +        #[cfg(unix)]
@@ -2510,10 +3226,59 @@ index 0000000..0fdb4f0
 +    path: std::path::PathBuf,
 +}
 +
++/// No original can be identified and held on unsupported systems.
++#[cfg(not(unix))]
++#[derive(Debug)]
++pub struct HeldOriginal(());
++
++#[cfg(not(unix))]
++impl HeldOriginal {
++    /// Unreachable: no value is ever constructed off Unix.
++    pub fn id(&self) -> &str {
++        ""
++    }
++}
++
++/// No handoff can be offered on unsupported systems.
++#[cfg(not(unix))]
++#[derive(Debug)]
++pub struct HandoffDir(std::path::PathBuf);
++
++#[cfg(not(unix))]
++impl HandoffDir {
++    /// Refuse: the contract requires a private 0700 directory.
++    pub fn create() -> anyhow::Result<Self> {
++        anyhow::bail!("document mode requires Unix directory-relative filesystem operations")
++    }
++
++    /// The HANDOFF argument.
++    pub fn path(&self) -> &std::path::Path {
++        &self.0
++    }
++
++    /// Nothing can acknowledge an uncreatable handoff.
++    pub fn wait_for_ack(&self, _timeout: std::time::Duration) -> bool {
++        false
++    }
++
++    /// Nothing to invalidate.
++    pub fn close(self, _held: HeldOriginal) -> anyhow::Result<()> {
++        Ok(())
++    }
++}
++
 +#[cfg(not(unix))]
 +impl Document {
 +    /// Refuse unsupported persistence before reading or creating any sidecar.
 +    pub fn open(_path: &std::path::Path) -> anyhow::Result<(Self, crate::model::CommentStore)> {
++        anyhow::bail!("document mode requires Unix directory-relative filesystem operations")
++    }
++
++    /// Refuse handoff binding too: there is no held-parent identity to check.
++    pub fn open_with(
++        _path: &std::path::Path,
++        _handoff: Option<&crate::config::Handoff>,
++    ) -> anyhow::Result<(Self, crate::model::CommentStore)> {
 +        anyhow::bail!("document mode requires Unix directory-relative filesystem operations")
 +    }
 +
@@ -2541,7 +3306,7 @@ index 0000000..0fdb4f0
 +    }
 +
 +    /// No held-parent-bound original identity exists on unsupported systems.
-+    pub fn file_id(&self) -> anyhow::Result<String> {
++    pub fn file_id(&self) -> anyhow::Result<HeldOriginal> {
 +        anyhow::bail!("document mode requires Unix directory-relative filesystem operations")
 +    }
 +
@@ -2602,7 +3367,7 @@ index 53f9c6c..0523984 100644
      fn find_defaults_to_the_ctrl_f_chord() {
          let keymap = Keymap::default();
 diff --git a/src/lib.rs b/src/lib.rs
-index 134b26a..c35c17e 100644
+index 134b26a..b798a43 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -13,6 +13,7 @@ pub mod azure_devops;
@@ -2622,16 +3387,18 @@ index 134b26a..c35c17e 100644
      log::init();
      // The config directory resolves once, at startup; every later read rereads only the
      // file inside it (`specs/config.md`). Only the environment names it here: the CLI
-@@ -70,7 +71,7 @@ pub fn run() -> Result<()> {
+@@ -70,7 +71,9 @@ pub fn run() -> Result<()> {
      // a wedged herdr must never hold the paint (issue #4).
      cfg.plugin_config_dir = config::resolve_config_dir(|| None);
      let mut initial_config = config::plugin_config(cfg.plugin_config_dir.as_deref());
 -    let mut app = app_for(&cfg, &initial_config);
-+    let mut app = app_for(&cfg, &initial_config)?;
++    // A refused startup (e.g. a handoff mismatch) exits non-zero with ONE line: the
++    // whole cause chain, before any terminal setup.
++    let mut app = app_for(&cfg, &initial_config).map_err(|error| anyhow::anyhow!("{error:#}"))?;
  
      let mut terminal = ratatui::init();
      // Bracketed paste so a multi-line paste arrives as one event, not raw keystrokes whose
-@@ -118,7 +119,23 @@ pub fn run() -> Result<()> {
+@@ -118,7 +121,23 @@ pub fn run() -> Result<()> {
      if let Some(dir) = cli_dir {
          cfg.plugin_config_dir = Some(dir.into());
          initial_config = config::plugin_config(cfg.plugin_config_dir.as_deref());
@@ -2656,7 +3423,7 @@ index 134b26a..c35c17e 100644
          if let Err(error) = terminal.draw(|f| ui::render(f, &app)) {
              restore_terminal(kbd);
              herdr::clear_pane_label();
-@@ -164,35 +181,85 @@ fn repo_root(cfg: &Config) -> std::path::PathBuf {
+@@ -164,35 +183,85 @@ fn repo_root(cfg: &Config) -> std::path::PathBuf {
  /// The startup app for one config snapshot: ready on `Ok`, blocked with the error on
  /// `Err`. Both the env-resolved build and the post-paint CLI-resolved rebuild go through
  /// here, so the two paths cannot drift.
@@ -2670,7 +3437,7 @@ index 134b26a..c35c17e 100644
          Err(error) => {
 -            let mut app = App::blocked(repo_root(cfg), Scope::Uncommitted, cfg.base.clone());
 +            let mut app = if let Some(path) = &cfg.document {
-+                App::new_document(path.clone(), cfg.document_line)?
++                App::new_document_with(path.clone(), cfg.document_line, cfg.handoff.as_ref())?
 +            } else {
 +                App::blocked(repo_root(cfg), Scope::Uncommitted, cfg.base.clone())
 +            };
@@ -2696,7 +3463,7 @@ index 134b26a..c35c17e 100644
 +/// Build a working pane, propagating exact-file failures rather than falling back to Git.
 +fn ready_app(cfg: &Config, plugin_config: PluginConfig) -> Result<App> {
 +    let mut app = if let Some(path) = &cfg.document {
-+        App::new_document(path.clone(), cfg.document_line)?
++        App::new_document_with(path.clone(), cfg.document_line, cfg.handoff.as_ref())?
 +    } else {
 +        let repo = repo_root(cfg);
 +        let scope = plugin_config.default_scope();
@@ -2758,7 +3525,7 @@ index 134b26a..c35c17e 100644
  }
  
  /// A transient status message (e.g. "sent 3 comments") fades after this long idle.
-@@ -596,6 +663,10 @@ pub fn land_world_completion(
+@@ -596,6 +665,10 @@ pub fn land_world_completion(
      completion: crate::world::WorldCompletion,
      generation: u64,
  ) -> bool {
@@ -2769,7 +3536,7 @@ index 134b26a..c35c17e 100644
      app.sync_turn_baseline(completion.input.turn_baseline.clone());
      if let Some(turn) = completion.turn.as_ref() {
          app.sync_agents_present(turn.agents_present);
-@@ -687,19 +758,21 @@ fn event_loop(
+@@ -687,19 +760,21 @@ fn event_loop(
      // a fresh probe proves its complete input still matches (`specs/forge-host.md`).
      let (probe_tx, probe_rx) =
          mpsc::channel::<(u64, Result<crate::forge::PrFetchInput, crate::forge::PrInputError>)>();
@@ -2798,7 +3565,7 @@ index 134b26a..c35c17e 100644
      let mut world_generation = 0_u64;
      let mut world_inflight: Option<(Instant, bool)> = None;
      // The search worker spawns on the first overlay open, so a session that never
-@@ -720,15 +793,30 @@ fn event_loop(
+@@ -720,15 +795,30 @@ fn event_loop(
      app.pr_pending = None;
      let result: Result<()> = (|| {
          while !app.should_quit {
@@ -2835,7 +3602,7 @@ index 134b26a..c35c17e 100644
                          Ok(_) => {}
                          Err(error) => {
                              let message = error.to_string();
-@@ -900,7 +988,10 @@ fn event_loop(
+@@ -900,7 +990,10 @@ fn event_loop(
  
              // Dispatch the queued refresh after the frame above painted, so a switch stays
              // instant and the fresh state lands behind it (specs/tui.md).
@@ -2847,7 +3614,7 @@ index 134b26a..c35c17e 100644
                  let request = app.world_request.take().expect("checked above");
                  world_generation = world_generation.wrapping_add(1);
                  let job = crate::world::WorldJob {
-@@ -927,10 +1018,12 @@ fn event_loop(
+@@ -927,10 +1020,12 @@ fn event_loop(
              // before it can paint, while the generation still coalesces repeated triggers into
              // one fresh fetch. Ambient triggers ride in-flight work and arm a trailing fetch
              // (`request_refresh`).
@@ -2862,7 +3629,7 @@ index 134b26a..c35c17e 100644
                  last_pr_poll = Instant::now();
                  pr.request_refresh(kind);
              }
-@@ -987,7 +1080,7 @@ fn event_loop(
+@@ -987,7 +1082,7 @@ fn event_loop(
                  }
              }
  
@@ -2871,7 +3638,7 @@ index 134b26a..c35c17e 100644
                  pr.probe_pending = false;
                  let (tx, repo, base, plugin_config, epoch) = (
                      probe_tx.clone(),
-@@ -1008,7 +1101,8 @@ fn event_loop(
+@@ -1008,7 +1103,8 @@ fn event_loop(
                  });
              }
  
@@ -2881,7 +3648,7 @@ index 134b26a..c35c17e 100644
                  && pr.active_probe_epoch.is_none()
                  && !pr.probe_pending
                  && let Some((generation, input)) = pr.refresh.take_fetch()
-@@ -1141,12 +1235,7 @@ fn event_loop(
+@@ -1141,12 +1237,7 @@ fn event_loop(
                      last_poll = Instant::now();
                      continue;
                  }
@@ -2895,7 +3662,7 @@ index 134b26a..c35c17e 100644
                  logln!(
                      "poll files={} composing={} diff_cursor={} scroll={}",
                      app.entries.len(),
-@@ -1196,6 +1285,10 @@ fn apply_pr_probe_result(
+@@ -1196,6 +1287,10 @@ fn apply_pr_probe_result(
      result: Result<crate::forge::PrFetchInput, crate::forge::PrInputError>,
      config_epoch: u64,
  ) -> bool {
@@ -2906,7 +3673,7 @@ index 134b26a..c35c17e 100644
      match result {
          Err(error) => {
              pr.refresh.probe_failed(pr.probe_pending);
-@@ -1255,7 +1348,7 @@ fn reconcile_plugin_config(
+@@ -1255,7 +1350,7 @@ fn reconcile_plugin_config(
      app: &mut App,
      cfg: &Config,
      config_epoch: &mut u64,
@@ -2915,7 +3682,7 @@ index 134b26a..c35c17e 100644
      recovery_inflight: &mut bool,
      pr: &mut PrCoordinator,
  ) -> ConfigGate {
-@@ -1270,7 +1363,7 @@ fn reconcile_plugin_config(
+@@ -1270,7 +1365,7 @@ fn reconcile_plugin_config(
      };
  
      let pr_changed = previous.forge_hosts() != current.forge_hosts();
@@ -2924,7 +3691,7 @@ index 134b26a..c35c17e 100644
          pr.config_changed(app.tab == crate::app::Tab::Pr);
      }
      if previous.theme() != current.theme() {
-@@ -1290,7 +1383,7 @@ fn observe_plugin_config(
+@@ -1290,7 +1385,7 @@ fn observe_plugin_config(
      app: &mut App,
      cfg: &Config,
      epoch: &mut u64,
@@ -2933,7 +3700,7 @@ index 134b26a..c35c17e 100644
      recovery_inflight: &mut bool,
  ) -> bool {
      apply_plugin_config_observation(
-@@ -1307,7 +1400,7 @@ fn apply_plugin_config_observation(
+@@ -1307,7 +1402,7 @@ fn apply_plugin_config_observation(
      app: &mut App,
      cfg: &Config,
      epoch: &mut u64,
@@ -2942,7 +3709,7 @@ index 134b26a..c35c17e 100644
      recovery_inflight: &mut bool,
      observed: Result<PluginConfig, config::PluginConfigError>,
  ) -> bool {
-@@ -1322,10 +1415,7 @@ fn apply_plugin_config_observation(
+@@ -1322,10 +1417,7 @@ fn apply_plugin_config_observation(
                      let (tx, cfg, target, recovery_epoch) =
                          (recovery_tx.clone(), cfg.clone(), next, *epoch);
                      thread::spawn(move || {
@@ -2954,7 +3721,7 @@ index 134b26a..c35c17e 100644
                          let _ = tx.send((recovery_epoch, target, recovered));
                      });
                  }
-@@ -1596,6 +1686,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) ->
+@@ -1596,6 +1688,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) ->
              K::BasePick => app.open_base_picker(),
              K::Select => app.toggle_select(),
              K::Comment => app.start_comment(),
@@ -2962,7 +3729,7 @@ index 134b26a..c35c17e 100644
              // `edit`/`delete` act on the comment under the diff cursor, so they only fire with
              // the diff focused — otherwise `delete` would silently drop a comment under an
              // off-screen cursor. (The comments-list overlay targets the highlighted row instead.)
-@@ -1740,6 +1831,12 @@ pub fn handle_mouse(
+@@ -1740,6 +1833,12 @@ pub fn handle_mouse(
          }
          return Ok(());
      }
@@ -2975,7 +3742,7 @@ index 134b26a..c35c17e 100644
      // A mouse gesture is one of the "any other input" that drops an armed crossing: the reviewer
      // who reaches for the mouse has left the file's edge behind (`specs/input.md`). Pointer motion
      // is not a gesture — capture reports every move over the pane, and a pointer resting on
-@@ -1881,6 +1978,218 @@ mod refresh_tests {
+@@ -1881,6 +1980,218 @@ mod refresh_tests {
      };
      use crate::app::{App, Tab};
  
@@ -3194,7 +3961,7 @@ index 134b26a..c35c17e 100644
      #[test]
      fn the_indicator_lights_only_for_a_building_job_past_the_delay() {
          use std::time::Duration;
-@@ -2068,7 +2377,7 @@ mod refresh_tests {
+@@ -2068,7 +2379,7 @@ mod refresh_tests {
          let config_dir = tempfile::tempdir().unwrap();
          let path = config_dir.path().join("config.toml");
          std::fs::write(&path, "navigator_position = \"right\"\n").unwrap();
@@ -3203,7 +3970,7 @@ index 134b26a..c35c17e 100644
          let mut app = App::new(repo.path().to_path_buf(), Scope::Uncommitted, None);
          app.set_plugin_config(plugin_config_in(config_dir.path()).unwrap());
          let painted = PaintedFrameSnapshot::capture(&app);
-@@ -2582,7 +2891,7 @@ mod refresh_tests {
+@@ -2582,7 +2893,7 @@ mod refresh_tests {
          let repo = tempfile::tempdir().unwrap();
          let config_dir = tempfile::tempdir().unwrap();
          std::fs::write(config_dir.path().join("config.toml"), "auto_open = false\n").unwrap();
@@ -3212,7 +3979,7 @@ index 134b26a..c35c17e 100644
          let mut app = App::new(repo.path().to_path_buf(), Scope::Uncommitted, None);
          let (tx, _rx) = mpsc::channel();
          let mut epoch = 0;
-@@ -2621,8 +2930,8 @@ mod refresh_tests {
+@@ -2621,8 +2932,8 @@ mod refresh_tests {
          let config_dir = tempfile::tempdir().unwrap();
          let path = config_dir.path().join("config.toml");
          std::fs::write(&path, "default_scope = \"branch\"\n").unwrap();
@@ -3223,7 +3990,7 @@ index 134b26a..c35c17e 100644
          assert_eq!(app.scope, Scope::Branch, "startup seeds the configured scope");
  
          // The user switches in-session; a reread with a different default must not move it.
-@@ -2649,7 +2958,7 @@ mod refresh_tests {
+@@ -2649,7 +2960,7 @@ mod refresh_tests {
          let config_dir = tempfile::tempdir().unwrap();
          let path = config_dir.path().join("config.toml");
          std::fs::write(&path, "unknown = true\n").unwrap();
@@ -3232,12 +3999,258 @@ index 134b26a..c35c17e 100644
          let mut app = App::new(repo.path().to_path_buf(), Scope::Uncommitted, None);
          let (tx, rx) = mpsc::channel();
          let mut epoch = 0;
-@@ -2679,6 +2988,6 @@ mod refresh_tests {
+@@ -2679,6 +2990,252 @@ mod refresh_tests {
              rx.recv_timeout(Duration::from_secs(5)).expect("recovery worker");
          assert_eq!(recovery_epoch, epoch);
          assert_eq!(target.theme(), "gruvbox");
 -        assert_eq!(recovered.plugin_config().unwrap().theme(), "gruvbox");
 +        assert_eq!(recovered.unwrap().plugin_config().unwrap().theme(), "gruvbox");
++    }
++}
++
++/// Handoff contract v3, receiver side: `--file FILE --expect-parent P --expect-file F
++/// --handoff H` binds FILE through its held parent without resolving it, checks both
++/// identities, acknowledges with `H/ack`, and only then creates the lock or sidecar.
++#[cfg(all(test, unix))]
++mod handoff_receiver_tests {
++    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, symlink};
++    use std::path::{Path, PathBuf};
++
++    use super::{Config, ready_app};
++    use crate::app::App;
++
++    /// The contract's unsigned decimal `DEV:INO` of an entry itself (never followed).
++    fn id_of(path: &Path) -> String {
++        let meta = std::fs::symlink_metadata(path).unwrap();
++        format!("{}:{}", meta.dev(), meta.ino())
++    }
++
++    /// Sorted entry names, to prove a refusal created nothing.
++    fn listing(dir: &Path) -> Vec<String> {
++        let mut names: Vec<String> = std::fs::read_dir(dir)
++            .unwrap()
++            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
++            .collect();
++        names.sort();
++        names
++    }
++
++    /// `root/current/A.md` (the sender's identified original), an unrelated
++    /// `root/B.md`, and a sender-created 0700 `root/explorr-handoff-test`.
++    struct Fixture {
++        _dir: tempfile::TempDir,
++        root: PathBuf,
++        parent: PathBuf,
++        file: PathBuf,
++        other: PathBuf,
++        handoff: PathBuf,
++        parent_id: String,
++        file_id: String,
++    }
++
++    fn fixture() -> Fixture {
++        let dir = tempfile::tempdir().unwrap();
++        let root = dir.path().canonicalize().unwrap();
++        let parent = root.join("current");
++        std::fs::create_dir(&parent).unwrap();
++        let file = parent.join("A.md");
++        std::fs::write(&file, "# A\nsecond\n").unwrap();
++        let other = root.join("B.md");
++        std::fs::write(&other, "# B\nforeign\n").unwrap();
++        let handoff = root.join("explorr-handoff-test");
++        std::fs::DirBuilder::new().mode(0o700).create(&handoff).unwrap();
++        std::fs::set_permissions(&handoff, std::fs::Permissions::from_mode(0o700)).unwrap();
++        let parent_id = id_of(&parent);
++        let file_id = id_of(&file);
++        Fixture { _dir: dir, root, parent, file, other, handoff, parent_id, file_id }
++    }
++
++    /// Exactly the argv the Python helper passes: FILE, LINE and the triple.
++    fn argv(file: &Path, parent_id: &str, file_id: &str, handoff: &Path) -> Vec<String> {
++        [
++            "--file",
++            file.to_str().unwrap(),
++            "--line",
++            "2",
++            "--expect-parent",
++            parent_id,
++            "--expect-file",
++            file_id,
++            "--handoff",
++            handoff.to_str().unwrap(),
++        ]
++        .iter()
++        .map(|s| (*s).to_string())
++        .collect()
++    }
++
++    /// The real startup route: parse, then the same `ready_app` the binary runs.
++    fn start(args: Vec<String>) -> anyhow::Result<App> {
++        let cfg = Config::parse(args)?;
++        ready_app(&cfg, crate::config::PluginConfig::default())
++    }
++
++    #[test]
++    fn matching_triple_opens_exact_file_and_acknowledges() {
++        let f = fixture();
++        let app = start(argv(&f.file, &f.parent_id, &f.file_id, &f.handoff)).unwrap();
++        assert!(app.is_document());
++        assert_eq!(app.diff_path.as_deref(), f.file.to_str());
++        assert_eq!(app.visible[app.diff_cursor].text(), "second");
++        let ack = std::fs::symlink_metadata(f.handoff.join("ack")).unwrap();
++        assert!(ack.file_type().is_file());
++        assert_eq!(ack.mode() & 0o777, 0o600);
++        assert_eq!(listing(&f.handoff), ["ack"]);
++        assert_eq!(listing(&f.parent), ["A.md", "A.md.reviewr.json.lock"]);
++        assert_eq!(std::fs::read_to_string(&f.file).unwrap(), "# A\nsecond\n");
++    }
++
++    /// Each swap happens AFTER the sender identified A (the fixture's ids) and
++    /// BEFORE the receiver starts; every one must refuse with nothing created.
++    #[test]
++    fn swapped_or_mismatched_handoffs_are_refused_with_nothing_created() {
++        let cases = [
++            "absolute-symlink",
++            "relative-symlink",
++            "hard-link",
++            "replaced-regular",
++            "fifo",
++            "missing",
++            "parent-real-dir",
++            "parent-symlink-to-moved",
++            "parent-symlink-elsewhere",
++            "wrong-parent-id",
++            "wrong-file-id",
++            "swapped-ids",
++            "invalidated-handoff",
++            "existing-ack",
++            "group-writable-handoff",
++            "symlink-handoff",
++        ];
++        for case in cases {
++            let f = fixture();
++            let mut parent_id = f.parent_id.clone();
++            let mut file_id = f.file_id.clone();
++            let mut handoff = f.handoff.clone();
++            let moved = f.root.join("moved");
++            match case {
++                "absolute-symlink" => {
++                    std::fs::remove_file(&f.file).unwrap();
++                    symlink(&f.other, &f.file).unwrap();
++                }
++                "relative-symlink" => {
++                    std::fs::remove_file(&f.file).unwrap();
++                    symlink("../B.md", &f.file).unwrap();
++                }
++                "hard-link" => {
++                    std::fs::remove_file(&f.file).unwrap();
++                    std::fs::hard_link(&f.other, &f.file).unwrap();
++                }
++                "replaced-regular" => {
++                    // A different inode; keep a link to A so its number cannot be reused.
++                    std::fs::hard_link(&f.file, f.root.join("A.keep")).unwrap();
++                    std::fs::remove_file(&f.file).unwrap();
++                    std::fs::write(&f.file, "# A\nimpostor\n").unwrap();
++                }
++                "fifo" => {
++                    std::fs::hard_link(&f.file, f.root.join("A.keep")).unwrap();
++                    std::fs::remove_file(&f.file).unwrap();
++                    rustix::fs::mknodat(
++                        rustix::fs::CWD,
++                        &f.file,
++                        rustix::fs::FileType::Fifo,
++                        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
++                        0,
++                    )
++                    .unwrap();
++                }
++                "missing" => {
++                    std::fs::rename(&f.file, f.root.join("A.keep")).unwrap();
++                }
++                "parent-real-dir" => {
++                    std::fs::rename(&f.parent, &moved).unwrap();
++                    std::fs::create_dir(&f.parent).unwrap();
++                    std::fs::hard_link(moved.join("A.md"), f.parent.join("A.md")).unwrap();
++                }
++                "parent-symlink-to-moved" => {
++                    // Same directory inode, but only reachable by resolving a symlink.
++                    std::fs::rename(&f.parent, &moved).unwrap();
++                    symlink(&moved, &f.parent).unwrap();
++                }
++                "parent-symlink-elsewhere" => {
++                    std::fs::rename(&f.parent, &moved).unwrap();
++                    let elsewhere = f.root.join("elsewhere");
++                    std::fs::create_dir(&elsewhere).unwrap();
++                    std::fs::write(elsewhere.join("A.md"), "# A\nelsewhere\n").unwrap();
++                    symlink(&elsewhere, &f.parent).unwrap();
++                }
++                "wrong-parent-id" => parent_id = id_of(&f.root),
++                "wrong-file-id" => file_id = id_of(&f.other),
++                "swapped-ids" => std::mem::swap(&mut parent_id, &mut file_id),
++                "invalidated-handoff" => {
++                    let closed = f.root.join("explorr-handoff-test.closed");
++                    std::fs::rename(&f.handoff, &closed).unwrap();
++                }
++                "existing-ack" => std::fs::write(f.handoff.join("ack"), b"").unwrap(),
++                "group-writable-handoff" => {
++                    std::fs::set_permissions(&f.handoff, std::fs::Permissions::from_mode(0o770))
++                        .unwrap();
++                }
++                "symlink-handoff" => {
++                    handoff = f.root.join("explorr-handoff-link");
++                    symlink(&f.handoff, &handoff).unwrap();
++                }
++                _ => unreachable!(),
++            }
++            let before_root = listing(&f.root);
++            let before_parent = listing(&f.parent);
++            let before_handoff = f.handoff.exists().then(|| listing(&f.handoff));
++            let error = match start(argv(&f.file, &parent_id, &file_id, &handoff)) {
++                Ok(_) => panic!("{case}: a swapped handoff must be refused"),
++                Err(error) => format!("{error:#}"),
++            };
++            assert!(!error.contains("cannot be combined"), "{case}: parsed as a repo: {error}");
++            assert_eq!(listing(&f.root), before_root, "{case}: {error}");
++            assert_eq!(listing(&f.parent), before_parent, "{case}: no lock or sidecar");
++            if moved.exists() {
++                assert!(!listing(&moved).iter().any(|name| name.contains(".reviewr")), "{case}");
++            }
++            assert_eq!(f.handoff.exists().then(|| listing(&f.handoff)), before_handoff, "{case}");
++            assert_eq!(std::fs::read_to_string(&f.other).unwrap(), "# B\nforeign\n", "{case}");
++        }
++    }
++
++    /// An unrelated aliased spelling is never resolved with the triple: the exact
++    /// FILE spelling is bound, so even the right ids through a symlinked parent fail.
++    #[test]
++    fn triple_never_resolves_a_symlinked_spelling() {
++        let f = fixture();
++        let alias = f.root.join("alias");
++        symlink(&f.parent, &alias).unwrap();
++        let error = start(argv(&alias.join("A.md"), &f.parent_id, &f.file_id, &f.handoff))
++            .err()
++            .expect("a symlinked parent spelling is refused");
++        assert!(!format!("{error:#}").contains("cannot be combined"), "{error:#}");
++        assert_eq!(listing(&f.parent), ["A.md"]);
++        assert!(listing(&f.handoff).is_empty());
++        let link = f.parent.join("link.md");
++        symlink("A.md", &link).unwrap();
++        assert!(start(argv(&link, &f.parent_id, &f.file_id, &f.handoff)).is_err());
++        assert_eq!(listing(&f.parent), ["A.md", "link.md"]);
++        assert!(listing(&f.handoff).is_empty());
++    }
++
++    /// Without the triple, manual `--file` keeps working exactly as before: a symlink
++    /// alias still resolves to the canonical original and no handoff is touched.
++    #[test]
++    fn no_triple_is_unchanged() {
++        let f = fixture();
++        let alias = f.root.join("alias.md");
++        symlink(&f.file, &alias).unwrap();
++        let app = start(vec!["--file".into(), alias.display().to_string()]).unwrap();
++        assert_eq!(app.diff_path.as_deref(), f.file.to_str());
++        assert!(listing(&f.handoff).is_empty());
++        assert_eq!(listing(&f.parent), ["A.md", "A.md.reviewr.json.lock"]);
      }
  }
 diff --git a/src/model.rs b/src/model.rs

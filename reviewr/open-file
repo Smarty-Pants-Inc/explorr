@@ -82,45 +82,60 @@ def unsafe_path(path):
                for char in path)
 
 
-def edit_target(file_arg, expected_parent, expected_file):
-    """Check Reviewr's already-canonical original WITHOUT resolving it.
+def checked_target(file_arg, expected_parent, expected_file):
+    """Check the sender's already-resolved FILE WITHOUT resolving it again.
 
-    Resolving would follow a symlink swapped in after Reviewr verified, and
-    hand the editor another file in the same directory. Explorr re-checks both
-    identities itself, through its own no-follow open."""
+    The sender (Explorr link/explorer, or Reviewr) identified the file and holds
+    it open until the receiver acknowledges, so its inode cannot be reused.
+    Resolving here would follow a symlink swapped in since, and hand the receiver
+    another file. The receiver re-checks both identities through its own
+    no-follow open."""
     if not os.path.isabs(file_arg) or os.path.normpath(file_arg) != file_arg:
-        raise LaunchError("FILE must be Reviewr's absolute canonical original path")
+        raise LaunchError("FILE must be the sender's absolute normalized path")
     file = Path(file_arg)
     try:
         info = os.lstat(file)
     except OSError as error:
-        raise LaunchError(f"the reviewed document is gone: {error}") from error
+        raise LaunchError(f"the file is gone: {error}") from error
     if not stat.S_ISREG(info.st_mode):
-        raise LaunchError("the reviewed document is no longer a regular file "
-                          "(symlink or other); refusing to edit")
+        raise LaunchError("the file is no longer a regular file (symlink or other); refusing")
     if dev_ino(info) != expected_file:
-        raise LaunchError("the reviewed document was replaced; refusing to edit")
+        raise LaunchError("the file was replaced; refusing")
     if dev_ino(os.stat(file.parent)) != expected_parent:
-        raise LaunchError("the reviewed document's directory was replaced; refusing to edit")
+        raise LaunchError("the file's directory was replaced; refusing")
     return file
+
+
+def checked_handoff(handoff):
+    """The sender's private, per-launch acknowledgement directory."""
+    if (not handoff or unsafe_path(handoff) or not os.path.isabs(handoff)
+            or os.path.normpath(handoff) != handoff):
+        raise LaunchError("HANDOFF must be the sender's absolute handoff directory")
+    try:
+        info = os.lstat(handoff)
+    except OSError as error:
+        raise LaunchError(f"HANDOFF is gone: {error}") from error
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+            or info.st_mode & 0o077):
+        raise LaunchError("HANDOFF must be a private (0700) directory owned by this user")
+    return handoff
 
 
 def launch(args, edit=False):
     """Validate before splitting, launch once, and clean up only our new pane."""
-    # Edit original carries the identities of Reviewr's held directory AND the
-    # original file, so the native editor binds exactly what Reviewr verified.
-    if len(args) != (5 if edit else 3):
-        raise LaunchError("usage: FILE LINE COL" + (" PARENT_ID FILE_ID" if edit else "")
-                          + " (positive, 1-based coordinates)")
+    # Every route carries the identities of the file and its directory, held open
+    # by the sender, plus the handoff directory the receiver acknowledges in.
+    if len(args) != 6:
+        raise LaunchError("usage: FILE LINE COL PARENT_ID FILE_ID HANDOFF"
+                          " (positive, 1-based coordinates)")
     source = os.environ.get("HERDR_PANE_ID", "")
     if not PANE_ID.fullmatch(source):
         raise LaunchError("HERDR_PANE_ID must be a real pane ID (for example w1:p1)")
-    file_arg, line, col = args[:3]
-    expected_parent, expected_file = args[3:] if edit else (None, None)
-    if edit and not DEV_INO.fullmatch(expected_parent):
-        raise LaunchError("PARENT_ID must be DEV:INO of the reviewed document's directory")
-    if edit and not DEV_INO.fullmatch(expected_file):
-        raise LaunchError("FILE_ID must be DEV:INO of the reviewed document")
+    file_arg, line, col, expected_parent, expected_file, handoff = args
+    if not DEV_INO.fullmatch(expected_parent):
+        raise LaunchError("PARENT_ID must be DEV:INO of the file's directory")
+    if not DEV_INO.fullmatch(expected_file):
+        raise LaunchError("FILE_ID must be DEV:INO of the file")
     if not file_arg or unsafe_path(file_arg):
         raise LaunchError("FILE must name an existing regular UTF-8 file without control characters")
     if not re.fullmatch(r"[0-9]+", line) or not re.fullmatch(r"[0-9]+", col):
@@ -129,14 +144,8 @@ def launch(args, edit=False):
         raise LaunchError("LINE is outside the supported range (Reviewr: 1..4294967295)")
     if not 1 <= int(col) <= sys.maxsize:
         raise LaunchError("COL must be a positive platform integer")
-    if edit:
-        file = edit_target(file_arg, expected_parent, expected_file)
-    else:
-        file = Path(file_arg).resolve(strict=True)
-        if unsafe_path(str(file)):
-            raise LaunchError("canonical FILE must be UTF-8 without control characters")
-        if not file.is_file():
-            raise LaunchError("FILE must name an existing regular file")
+    file = checked_target(file_arg, expected_parent, expected_file)
+    handoff = checked_handoff(handoff)
     program = program_path(edit)
     manager = os.environ.get("HERDR_BIN_PATH") or "herdr"
     output = run_herdr(manager, "pane", "split", "--pane", source,
@@ -149,12 +158,14 @@ def launch(args, edit=False):
         raise LaunchError("HerdR split response did not identify a distinct real pane")
     if pane.split(":")[0] != source.split(":")[0]:
         raise LaunchError("HerdR split response identified a different workspace; refusing it")
+    identities = ["--expect-parent", expected_parent, "--expect-file", expected_file,
+                  "--handoff", handoff]
     if edit:
         command = [program, "--single-file-at", str(file), str(int(line)), str(int(col)),
-                   "--expect-parent", expected_parent, "--expect-file", expected_file]
+                   *identities]
     else:
         # Reviewr's anchor is a line, not a character/cursor position.
-        command = [program, "--file", str(file), "--line", str(int(line))]
+        command = [program, "--file", str(file), "--line", str(int(line)), *identities]
     try:
         run_herdr(manager, "pane", "run", pane, "exec " + shlex.join(command))
     except LaunchError as error:
