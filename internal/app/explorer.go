@@ -14,7 +14,7 @@ import (
 	"github.com/Smarty-Pants-Inc/explorr/internal/theme"
 )
 
-// NewExplorer builds the workspace-right HerdR file tree. It deliberately
+// NewExplorer builds the HerdR plugin file tree. It deliberately
 // omits editor tabs, LSPs, publishers, and the project finder: activating a
 // file opens a single-file editor in a right split beside its source pane.
 func NewExplorer(rootDir string) (*App, error) {
@@ -57,7 +57,7 @@ func (a *App) openTreeFile(path string) {
 		return
 	}
 	a.tree.ActiveFile = path
-	if err := openFileInHerdRSplit(path, 1, 1, ""); err != nil {
+	if err := OpenFileInHerdRSplit(path, 1, 1); err != nil {
 		a.openInfo("Could not open file", []string{err.Error()})
 	}
 }
@@ -70,19 +70,21 @@ type herdrPaneSplitResponse struct {
 	} `json:"result"`
 }
 
-// OpenFileInHerdRSplit opens a single-file editor beside the pane that
-// activated the HerdR link.
+// OpenFileInHerdRSplit opens a single-file editor beside the originating pane.
+// HerdR injects HERDR_PANE_ID for both link actions and ordinary plugin panes.
 func OpenFileInHerdRSplit(path string, line, col int) error {
-	sourcePaneID := strings.TrimSpace(os.Getenv("HERDR_PANE_ID"))
-	if sourcePaneID == "" {
-		return fmt.Errorf("HERDR_PANE_ID is not set")
-	}
-	return openFileInHerdRSplit(path, line, col, sourcePaneID)
+	return openFileInHerdRSplit(path, line, col, strings.TrimSpace(os.Getenv("HERDR_PANE_ID")))
 }
 
-// openFileInHerdRSplit sends explicit tiled pane targets positionally;
-// workspace-right plugin pseudo panes target their workspace instead.
+// openFileInHerdRSplit requires an explicit tiled origin; missing or legacy
+// sidebar origins must never fall back to another client's focused pane.
 func openFileInHerdRSplit(path string, line, col int, sourcePaneID string) error {
+	if sourcePaneID == "" {
+		return fmt.Errorf("HERDR_PANE_ID is not set; cannot identify the originating pane")
+	}
+	if strings.HasSuffix(sourcePaneID, ":plugin") {
+		return fmt.Errorf("HERDR_PANE_ID %q is a legacy sidebar, not a tiled originating pane", sourcePaneID)
+	}
 	herdrBin := strings.TrimSpace(os.Getenv("HERDR_BIN_PATH"))
 	if herdrBin == "" {
 		herdrBin = "herdr"
@@ -96,22 +98,12 @@ func openFileInHerdRSplit(path string, line, col int, sourcePaneID string) error
 		return err
 	}
 
-	splitArgs := []string{"pane", "split"}
-	if workspaceID, isPluginPane := strings.CutSuffix(sourcePaneID, ":plugin"); isPluginPane && workspaceID != "" {
-		splitArgs = append(splitArgs, "--workspace", workspaceID)
-	} else if sourcePaneID != "" {
-		splitArgs = append(splitArgs, sourcePaneID)
-	} else {
-		workspaceID := strings.TrimSpace(os.Getenv("HERDR_WORKSPACE_ID"))
-		if workspaceID == "" {
-			return fmt.Errorf("HERDR_WORKSPACE_ID is not set")
-		}
-		splitArgs = append(splitArgs, "--workspace", workspaceID)
-	}
-	splitArgs = append(splitArgs,
+	// The public CLI has no originating-client focus token. Keep focus unchanged
+	// rather than changing session focus on behalf of an unrelated client.
+	splitArgs := []string{"pane", "split", "--pane", sourcePaneID,
 		"--direction", "right",
 		"--cwd", filepath.Dir(abs),
-		"--focus")
+		"--no-focus"}
 	output, err := runHerdR(herdrBin, splitArgs...)
 	if err != nil {
 		return err
