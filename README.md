@@ -77,7 +77,8 @@ Explorr fallback: review comments must not be lost. Other files open in Explorr.
 as a URL. Dedicated link editors do not consume or publish another editor's global open/debug
 panel state. Their text saves bind the original file and directory: a replaced file or parent
 is refused without discarding your edits. Automatic path-based format-on-save is disabled in
-these dedicated panes; ordinary project editors retain it. Linking the plugin or creating a
+these dedicated panes; ordinary project editors retain it. Dedicated panes edit only their one
+file: rename symbol, workspace-wide fixes, and file create/rename/delete are refused there. Linking the plugin or creating a
 workspace does **not** automatically create explorer sidebars.
 
 To explicitly open the explorer beside your current HerdR pane:

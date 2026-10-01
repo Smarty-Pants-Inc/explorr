@@ -26,3 +26,8 @@ func (b *boundOriginal) save(string, []byte) (os.FileInfo, error) {
 func (b *boundOriginal) reload(string, bool) ([]byte, os.FileInfo, error) {
 	return nil, nil, fmt.Errorf("bound-original reloading is unsupported on this platform")
 }
+
+// parentID is unreachable after binding fails, and still never reports one.
+func (b *boundOriginal) parentID() (ParentID, error) {
+	return ParentID{}, fmt.Errorf("bound parent identity is unsupported on this platform")
+}

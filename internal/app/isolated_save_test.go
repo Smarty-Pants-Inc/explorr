@@ -571,7 +571,7 @@ func TestIsolatedSaveOrdinaryTrustPromptPreserved(t *testing.T) {
 			useTestTrustFile(t)
 			path, _ := isolatedReceiverFiles(t)
 			writeFormatConfig(t, filepath.Dir(path), `{"commands":{"txt":["echo","$FILE"]}}`)
-			a, err := newSingleFileAt(path, 1, 1, isolated)
+			a, err := newSingleFileAt(path, 1, 1, isolated, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

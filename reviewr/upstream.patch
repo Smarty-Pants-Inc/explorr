@@ -25,7 +25,7 @@ index 6add628..6013362 100644
  tempfile = "3"
  
 diff --git a/src/app.rs b/src/app.rs
-index 49829b8..9986f8e 100644
+index 49829b8..4d75af4 100644
 --- a/src/app.rs
 +++ b/src/app.rs
 @@ -8,7 +8,7 @@
@@ -55,7 +55,7 @@ index 49829b8..9986f8e 100644
      pub base: Option<String>,
      /// The `branch` scope's base outcome, carried by the latest landed snapshot — the
      /// header names its winner (or the skip) and the diff builds against the winner's OID
-@@ -656,6 +660,82 @@ impl App {
+@@ -656,6 +660,77 @@ impl App {
          Self::build(repo, scope, base, true)
      }
  
@@ -103,22 +103,17 @@ index 49829b8..9986f8e 100644
 +            return Ok(());
 +        }
 +        let document = self.document.as_ref().context("no document is open")?;
-+        let path = document.path();
-+        if path.canonicalize().context("locating document")? != path {
-+            bail!("original document target has changed");
-+        }
-+        let metadata = std::fs::metadata(path).context("reading document metadata")?;
-+        if !metadata.is_file() {
-+            bail!("document is no longer a regular file");
-+        }
-+        let file = path.to_str().context("document path is not UTF-8")?.to_owned();
-+        let (diff, content) = if crate::diff::over_byte_budget(metadata.len() as usize) {
-+            (FileDiff::too_large_notice(file.clone()), String::new())
-+        } else {
-+            let bytes = std::fs::read(path).context("reading document")?;
++        let file = document.path().to_str().context("document path is not UTF-8")?.to_owned();
++        // Read only through the held parent: a replaced parent (even one spelling the
++        // same canonical path) is refused, and the last good view and comments stay.
++        let bytes =
++            document.read_original(crate::diff::over_byte_budget).context("reading document")?;
++        let (diff, content) = if let Some(bytes) = bytes {
 +            let content = String::from_utf8_lossy(&bytes).into_owned();
 +            let diff = self.cache.get_file(file.clone(), &content, &self.highlighter);
 +            (diff, content)
++        } else {
++            (FileDiff::too_large_notice(file.clone()), String::new())
 +        };
 +        self.diff_path = Some(file);
 +        self.preview_text = if self.markdown_file() && diff.state == crate::diff::FileState::Normal
@@ -138,7 +133,7 @@ index 49829b8..9986f8e 100644
      /// Construct the error-only reviewr pane without reading repository state.
      pub(crate) fn blocked(repo: PathBuf, scope: Scope, base: Option<String>) -> Self {
          Self::build(repo, scope, base, false)
-@@ -669,6 +749,7 @@ impl App {
+@@ -669,6 +744,7 @@ impl App {
          let theme = theme::resolve(None);
          Self {
              repo,
@@ -146,7 +141,7 @@ index 49829b8..9986f8e 100644
              base,
              branch_base: git::BaseStatus::default(),
              base_epoch: 0,
-@@ -840,6 +921,11 @@ impl App {
+@@ -840,6 +916,11 @@ impl App {
      /// comments always survive; an in-progress draft keeps the exact frozen diff it was written
      /// against, matching the ordinary refresh invariant.
      pub(crate) fn carry_authored_state_from(&mut self, old: &mut Self) {
@@ -158,7 +153,7 @@ index 49829b8..9986f8e 100644
          self.store = std::mem::take(&mut old.store);
          self.list_cursor = old.list_cursor;
          // The footer expansion is one global toggle, carried regardless of the recovered mode
-@@ -867,8 +953,8 @@ impl App {
+@@ -867,8 +948,8 @@ impl App {
              // before the mode is stored, so none reaches recovery; the search query is not
              // restored and the picker's frozen rows are not either (specs/search.md,
              // specs/find-in-file.md, specs/herdr-host.md).
@@ -169,7 +164,7 @@ index 49829b8..9986f8e 100644
                  self.scope = old.scope;
                  self.tab = old.tab;
                  self.active_file_tab = old.active_file_tab;
-@@ -1015,6 +1101,9 @@ impl App {
+@@ -1015,6 +1096,9 @@ impl App {
      /// "a comment is never lost to a refresh" invariant (`specs/overview.md`).
      pub fn reload(&mut self) -> Result<()> {
          self.ensure_config_ready()?;
@@ -179,7 +174,7 @@ index 49829b8..9986f8e 100644
          // The PR tab holds its own state and renders nothing from the file tree, so a poll on
          // it skips the rebuild; switching back to a file tab reloads it then (specs/tui.md).
          if !self.tab.is_file_tab() {
-@@ -1073,6 +1162,9 @@ impl App {
+@@ -1073,6 +1157,9 @@ impl App {
      /// Reconcile a built snapshot into the view — the one place a world result touches place
      /// state, by identity first, then fallback, then clamp (`specs/overview.md` Continuity).
      pub fn reconcile_world(&mut self, snapshot: crate::world::WorldSnapshot) {
@@ -189,7 +184,7 @@ index 49829b8..9986f8e 100644
          // Keep the cursor on the same row target across the rebuild; fall back to the open
          // file, then the first file. The toggled-directory set survives untouched.
          let anchor = self.cursor_anchor();
-@@ -1132,6 +1224,12 @@ impl App {
+@@ -1132,6 +1219,12 @@ impl App {
      /// `previous_path`), the whole-file content in `All files`. The one place this dispatch lives,
      /// so opening a file from the tree and from a comment edit can't drift apart.
      fn open_path_in_tab(&mut self, path: String, previous_path: Option<String>) {
@@ -202,7 +197,7 @@ index 49829b8..9986f8e 100644
          match self.tab {
              Tab::AllFiles => self.set_file_view(&path),
              // `Changes` (the `PR` tab never opens a file in the read pane).
-@@ -1353,6 +1451,13 @@ impl App {
+@@ -1353,6 +1446,13 @@ impl App {
      /// `sample` rides the poll's status sample along; `reveal` re-reveals the cursor when
      /// the result lands, for user-initiated switches only (specs/tui.md).
      pub fn request_world_refresh(&mut self, sample_turn: bool, reveal: bool) {
@@ -216,7 +211,7 @@ index 49829b8..9986f8e 100644
          let request = self.world_request.get_or_insert(crate::world::WorldRequest::default());
          request.sample_turn |= sample_turn;
          request.reveal |= reveal;
-@@ -1818,6 +1923,9 @@ impl App {
+@@ -1818,6 +1918,9 @@ impl App {
      /// in progress is never stranded against a different diff.
      pub fn set_scope(&mut self, scope: Scope) -> Result<()> {
          self.ensure_config_ready()?;
@@ -226,7 +221,7 @@ index 49829b8..9986f8e 100644
          if self.scope != scope && !self.composing() {
              self.scope = scope;
              self.rebase_changes()?;
-@@ -1872,6 +1980,9 @@ impl App {
+@@ -1872,6 +1975,9 @@ impl App {
      /// Queue a PR refresh, merging into any request already pending: the stronger kind
      /// wins, so an ambient trigger can never downgrade the user's commanded refresh.
      pub fn request_pr_refresh(&mut self, kind: RefreshKind) {
@@ -236,7 +231,7 @@ index 49829b8..9986f8e 100644
          self.pr_pending = self.pr_pending.max(Some(kind));
      }
  
-@@ -1883,7 +1994,7 @@ impl App {
+@@ -1883,7 +1989,7 @@ impl App {
      /// stays on the same side.
      pub fn set_tab(&mut self, tab: Tab) -> Result<()> {
          self.ensure_config_ready()?;
@@ -245,7 +240,7 @@ index 49829b8..9986f8e 100644
              return Ok(());
          }
          self.tab = tab;
-@@ -2812,24 +2923,51 @@ impl App {
+@@ -2812,24 +2918,51 @@ impl App {
              self.cancel_comment();
              return;
          }
@@ -300,7 +295,7 @@ index 49829b8..9986f8e 100644
      /// Whether the selection has at least one content row a comment can attach to —
      /// a fold marker does not qualify.
      fn has_anchorable_selection(&self) -> bool {
-@@ -2948,7 +3086,11 @@ impl App {
+@@ -2948,7 +3081,11 @@ impl App {
          }
          if let Some(i) = self.target_comment() {
              logln!("comment delete [{i}]");
@@ -312,7 +307,7 @@ index 49829b8..9986f8e 100644
              self.clamp_list_cursor();
              self.status = "comment deleted".to_string();
              // Don't strand the user in an empty "Comments (0)" overlay, matching `export`.
-@@ -2982,6 +3124,65 @@ impl App {
+@@ -2982,6 +3119,77 @@ impl App {
          }
      }
  
@@ -357,10 +352,22 @@ index 49829b8..9986f8e 100644
 +        let result = (|| {
 +            self.ensure_config_ready()?;
 +            let (file, line) = self.original_edit_target()?;
++            // The helper contract carries the HELD parent's identity, so only a held
++            // document can be edited; verify it immediately before any launch.
++            let document = self
++                .document
++                .as_ref()
++                .context("edit original requires a held document (document mode)")?;
++            document.verify_location()?;
++            if file != document.path() {
++                bail!("original document target has changed");
++            }
++            let parent_id = document.parent_id()?;
 +            let output = std::process::Command::new(helper)
 +                .arg(file)
 +                .arg(line.to_string())
 +                .arg("1")
++                .arg(parent_id)
 +                .output()
 +                .context("launching original editor")?;
 +            if !output.status.success() {
@@ -378,7 +385,7 @@ index 49829b8..9986f8e 100644
      // --- Search overlay (specs/search.md) ------------------------------------------------
  
      /// The active scope's annotation for `path` — the search overlay's file rows wear the
-@@ -2992,6 +3193,9 @@ impl App {
+@@ -2992,6 +3200,9 @@ impl App {
  
      /// `/`: open the search screen, from any tab, from either pane (specs/search.md).
      pub fn open_search(&mut self) {
@@ -388,7 +395,7 @@ index 49829b8..9986f8e 100644
          // A navigator-divider drag held from the review view must not become a search-split
          // resize: cancel it so its remaining drag events are consumed, not acted on — the
          // search divider only drags a gesture it started itself (specs/input.md).
-@@ -3275,6 +3479,9 @@ impl App {
+@@ -3275,6 +3486,9 @@ impl App {
      /// pick lands the cursor on its line, clamped into the file's current length. A
      /// vanished path opens nothing and the screen stays (specs/search.md).
      pub fn search_open_pick(&mut self) -> Result<()> {
@@ -398,7 +405,7 @@ index 49829b8..9986f8e 100644
          let Some(s) = self.search.as_ref() else { return Ok(()) };
          // Off `Ready`, the painted screen shows no rows — held results are stale and
          // invisible, so nothing opens (specs/search.md).
-@@ -3554,6 +3761,20 @@ impl App {
+@@ -3554,6 +3768,20 @@ impl App {
              out.push((A::MoveFile, Move));
              out.push((A::MovePage, Move));
          }
@@ -419,7 +426,7 @@ index 49829b8..9986f8e 100644
          out
      }
  
-@@ -3643,7 +3864,10 @@ impl App {
+@@ -3643,7 +3871,10 @@ impl App {
      /// `--base` flag (`specs/input.md` Base picker).
      #[must_use]
      pub fn base_pick_available(&self) -> bool {
@@ -431,7 +438,7 @@ index 49829b8..9986f8e 100644
      }
  
      /// Open the base picker: one row per branch name, the open PR's target starred first,
-@@ -3765,7 +3989,9 @@ impl App {
+@@ -3765,7 +3996,9 @@ impl App {
          logln!("export ({n}) -> {} ::\n{text}", target.label());
          let delivered = match target.export(&text) {
              Ok(()) => {
@@ -442,7 +449,7 @@ index 49829b8..9986f8e 100644
                  self.status = target.success_message(n);
                  logln!("export OK");
                  true
-@@ -3923,6 +4149,11 @@ fn hunk_row(rows: &[Row], from: Option<usize>, forward: bool) -> Option<usize> {
+@@ -3923,6 +4156,11 @@ fn hunk_row(rows: &[Row], from: Option<usize>, forward: bool) -> Option<usize> {
      }
  }
  
@@ -454,7 +461,7 @@ index 49829b8..9986f8e 100644
  /// Whether `path` names a markdown file: a `.md`/`.markdown` extension,
  /// case-insensitive (specs/diff-view.md).
  fn is_markdown_path(path: &str) -> bool {
-@@ -4166,6 +4397,375 @@ mod tests {
+@@ -4166,6 +4404,545 @@ mod tests {
          assert_eq!(recovered.focus, crate::Focus::Diff, "and focus lands on the read pane");
      }
  
@@ -809,9 +816,17 @@ index 49829b8..9986f8e 100644
 +        let helper = dir.path().join("editor-helper");
 +        std::fs::write(&helper, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\n").unwrap();
 +        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
-+        app.edit_original_with(helper.as_os_str()).unwrap();
++        launch_recording_helper(&mut app, &helper);
 +        let args = std::fs::read_to_string(dir.path().join("editor-helper.args")).unwrap();
-+        assert_eq!(args, format!("{}\n2\n1\n", path.canonicalize().unwrap().display()));
++        let canonical = path.canonicalize().unwrap();
++        assert_eq!(
++            args,
++            format!(
++                "{}\n2\n1\n{}\n",
++                canonical.display(),
++                parent_id_of(canonical.parent().unwrap())
++            )
++        );
 +        assert_eq!(app.status, "opened original in editor");
 +        std::fs::write(&helper, "#!/bin/sh\necho split-unavailable >&2\nexit 7\n").unwrap();
 +        assert!(app.edit_original_with(helper.as_os_str()).is_err());
@@ -825,6 +840,168 @@ index 49829b8..9986f8e 100644
 +        repo_app.visible =
 +            vec![crate::diff::Row::Deletion { old_no: 2, spans: Vec::new(), emphasis: Vec::new() }];
 +        assert!(repo_app.original_edit_target().is_err());
++    }
++
++    /// The cross-language PARENT_ID contract: unsigned decimal `DEV:INO` of a directory.
++    #[cfg(unix)]
++    fn parent_id_of(dir: &std::path::Path) -> String {
++        use std::os::unix::fs::MetadataExt;
++        let metadata = std::fs::metadata(dir).unwrap();
++        format!("{}:{}", metadata.dev(), metadata.ino())
++    }
++
++    /// A recording helper outside the reviewed directory; it writes argv only if it runs.
++    #[cfg(unix)]
++    fn recording_helper(dir: &std::path::Path) -> (PathBuf, PathBuf) {
++        use std::os::unix::fs::PermissionsExt;
++        let helper = dir.join("recording-helper");
++        std::fs::write(&helper, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\n").unwrap();
++        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
++        let args = dir.join("recording-helper.args");
++        (helper, args)
++    }
++
++    /// Launch a just-written script helper, retrying only the Linux ETXTBSY race where a
++    /// concurrently forked test child briefly inherits the script's write descriptor.
++    #[cfg(unix)]
++    fn launch_recording_helper(app: &mut App, helper: &std::path::Path) {
++        for _ in 0..100 {
++            match app.edit_original_with(helper.as_os_str()) {
++                Ok(()) => return,
++                Err(error)
++                    if error.chain().any(|cause| {
++                        cause
++                            .downcast_ref::<std::io::Error>()
++                            .is_some_and(|io| io.kind() == std::io::ErrorKind::ExecutableFileBusy)
++                    }) =>
++                {
++                    std::thread::sleep(std::time::Duration::from_millis(10));
++                }
++                Err(error) => panic!("{error:#}"),
++            }
++        }
++        panic!("helper stayed busy");
++    }
++
++    /// A reviewed `current/A.md` beside an unrelated `B.md`, with one saved comment.
++    fn replaced_parent_fixture() -> (tempfile::TempDir, PathBuf, App) {
++        let root = tempfile::tempdir().unwrap();
++        let parent = root.path().join("current");
++        std::fs::create_dir(&parent).unwrap();
++        let path = parent.join("A.md");
++        std::fs::write(&path, "a-one\na-two\n").unwrap();
++        std::fs::write(root.path().join("B.md"), "b-one\nb-two\n").unwrap();
++        let mut app = App::new_document(path.clone(), 1).unwrap();
++        add_document_comment(&mut app, "keep this comment");
++        (root, path, app)
++    }
++
++    /// Move `current` aside and recreate it as a REAL directory holding another `A.md`:
++    /// either a hard link to `B.md` or a plain different file. Spelling still matches.
++    fn replace_parent_with_real_directory(root: &std::path::Path, hard_link: bool) {
++        std::fs::rename(root.join("current"), root.join("moved")).unwrap();
++        std::fs::create_dir(root.join("current")).unwrap();
++        let replacement = root.join("current").join("A.md");
++        if hard_link {
++            std::fs::hard_link(root.join("B.md"), &replacement).unwrap();
++        } else {
++            std::fs::write(&replacement, "plain-one\nplain-two\n").unwrap();
++        }
++    }
++
++    /// Every visible source row's text, to prove which file's content is on screen.
++    fn visible_texts(app: &App) -> Vec<String> {
++        app.visible.iter().map(|row| row.text().to_owned()).collect()
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn document_refresh_refuses_replaced_parent_keeping_view_and_comments() {
++        for hard_link in [true, false] {
++            let (root, _path, mut app) = replaced_parent_fixture();
++            assert_eq!(visible_texts(&app), ["a-one", "a-two"]);
++            replace_parent_with_real_directory(root.path(), hard_link);
++            let error = format!("{:#}", app.reload().unwrap_err());
++            assert!(error.contains("parent directory changed"), "{error}");
++            // The event-loop refresh path reports the refusal as a status error.
++            app.request_world_refresh(true, false);
++            assert!(app.status.starts_with("document reload failed:"), "{}", app.status);
++            assert!(app.status.contains("parent directory changed"), "{}", app.status);
++            assert_eq!(visible_texts(&app), ["a-one", "a-two"], "last good content stays");
++            assert!(!app.preview_text.contains("b-one") && !app.preview_text.contains("plain"));
++            assert_eq!(app.store.len(), 1);
++            assert_eq!(app.store.get(0).unwrap().text, "keep this comment");
++            assert_eq!(
++                std::fs::read(root.path().join("moved").join("A.md")).unwrap(),
++                b"a-one\na-two\n"
++            );
++        }
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn document_edit_original_refuses_replaced_parent_without_running_helper() {
++        for hard_link in [true, false] {
++            let (root, _path, mut app) = replaced_parent_fixture();
++            let (helper, args) = recording_helper(root.path());
++            replace_parent_with_real_directory(root.path(), hard_link);
++            let error = format!("{:#}", app.edit_original_with(helper.as_os_str()).unwrap_err());
++            assert!(error.contains("parent directory changed"), "{error}");
++            assert!(!args.exists(), "the helper must never be launched");
++            assert!(app.status.starts_with("edit original failed:"), "{}", app.status);
++            assert!(app.status.contains("parent directory changed"), "{}", app.status);
++            assert_eq!(app.store.len(), 1);
++        }
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn document_same_parent_atomic_replacement_still_refreshes_and_edits() {
++        let (root, path, mut app) = replaced_parent_fixture();
++        let parent = root.path().join("current");
++        let temporary = parent.join(".A.md.editor-save");
++        std::fs::write(&temporary, "saved-one\nsaved-two\nsaved-three\n").unwrap();
++        std::fs::rename(&temporary, &path).unwrap();
++        app.reload().unwrap();
++        assert_eq!(visible_texts(&app), ["saved-one", "saved-two", "saved-three"]);
++        assert_eq!(app.store.len(), 1);
++        let (helper, args) = recording_helper(root.path());
++        launch_recording_helper(&mut app, &helper);
++        let canonical = path.canonicalize().unwrap();
++        assert_eq!(
++            std::fs::read_to_string(args).unwrap(),
++            format!("{}\n1\n1\n{}\n", canonical.display(), parent_id_of(&parent))
++        );
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn document_refresh_and_edit_refuse_symlinked_parent_or_original() {
++        use std::os::unix::fs::symlink;
++        // The parent swapped to a symlink at a directory with a same-named original.
++        let (root, _path, mut app) = replaced_parent_fixture();
++        std::fs::rename(root.path().join("current"), root.path().join("moved")).unwrap();
++        let elsewhere = root.path().join("elsewhere");
++        std::fs::create_dir(&elsewhere).unwrap();
++        std::fs::write(elsewhere.join("A.md"), "other-one\n").unwrap();
++        symlink(&elsewhere, root.path().join("current")).unwrap();
++        assert!(app.reload().is_err());
++        assert_eq!(visible_texts(&app), ["a-one", "a-two"]);
++        let (helper, args) = recording_helper(root.path());
++        assert!(app.edit_original_with(helper.as_os_str()).is_err());
++        assert!(!args.exists());
++        assert_eq!(app.store.len(), 1);
++
++        // The original itself replaced by a symlink inside the unchanged parent.
++        let (root, path, mut app) = replaced_parent_fixture();
++        std::fs::remove_file(&path).unwrap();
++        symlink(root.path().join("B.md"), &path).unwrap();
++        assert!(app.reload().is_err());
++        assert_eq!(visible_texts(&app), ["a-one", "a-two"]);
++        let (helper, args) = recording_helper(root.path());
++        assert!(app.edit_original_with(helper.as_os_str()).is_err());
++        assert!(!args.exists());
++        assert_eq!(app.store.len(), 1);
 +    }
 +
      #[test]
@@ -1011,10 +1188,10 @@ index 39baa9a..e4ceefc 100644
          let c = parse(&["--poll", "500", "--base", "origin/dev", "/tmp/work"]);
 diff --git a/src/document.rs b/src/document.rs
 new file mode 100644
-index 0000000..adfa274
+index 0000000..079a5d6
 --- /dev/null
 +++ b/src/document.rs
-@@ -0,0 +1,1080 @@
+@@ -0,0 +1,1197 @@
 +//! Single-document comment snapshots, separate from the git review model.
 +//!
 +//! The approved document-mode contract persists the seven fields in
@@ -1151,9 +1328,50 @@ index 0000000..adfa274
 +            Ok(())
 +        }
 +
++        /// Read the original's current bytes only through the held parent directory.
++        ///
++        /// A replaced or moved parent is refused (even when the pathname still spells
++        /// the same canonical file), as is a missing, symlinked, or non-regular entry.
++        /// Atomic replacement of the original within the same parent is followed.
++        /// `Ok(None)` means the regular original exceeds the caller's display budget.
++        pub fn read_original(
++            &self,
++            over_budget: impl Fn(usize) -> bool,
++        ) -> Result<Option<Vec<u8>>> {
++            self.verify_location()?;
++            let fd = rfs::openat(
++                &self.directory,
++                entry_name(&self.path)?,
++                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
++                Mode::empty(),
++            )
++            .with_context(|| format!("open document {}", self.path.display()))?;
++            let mut file = File::from(fd);
++            check_opened_entry(&self.directory, &self.path, &file)?;
++            let size = rfs::fstat(&file)
++                .with_context(|| format!("inspect document {}", self.path.display()))?
++                .st_size;
++            if usize::try_from(size).map_or(true, &over_budget) {
++                return Ok(None);
++            }
++            let mut bytes = Vec::new();
++            file.read_to_end(&mut bytes)
++                .with_context(|| format!("read document {}", self.path.display()))?;
++            // Refuse content whose parent was replaced while it was being read.
++            self.verify_location()?;
++            Ok(if over_budget(bytes.len()) { None } else { Some(bytes) })
++        }
++
++        /// The held parent's identity per the cross-language PARENT_ID contract:
++        /// unsigned decimal `DEV:INO` from fstat of the held directory, never a path.
++        pub fn parent_id(&self) -> Result<String> {
++            let stat = rfs::fstat(&self.directory).context("inspect held document parent")?;
++            Ok(format_parent_id(&stat))
++        }
++
 +        /// Permit atomic replacement of the original, but never a different parent,
 +        /// a missing/non-regular target, or a lock entry no longer naming our lease.
-+        fn verify_location(&self) -> Result<()> {
++        pub fn verify_location(&self) -> Result<()> {
 +            verify_parent(&self.directory, &self.path)?;
 +            regular_entry(&self.directory, &self.path)?.context("document is missing")?;
 +            check_opened_entry(&self.directory, &append_suffix(&self.sidecar, ".lock"), &self.lock)
@@ -1206,6 +1424,12 @@ index 0000000..adfa274
 +            bail!("document parent directory changed: {}", parent.display());
 +        }
 +        Ok(())
++    }
++
++    /// `st_dev as u64` deliberately matches the contract on platforms with a signed dev_t.
++    #[allow(clippy::unnecessary_cast)]
++    fn format_parent_id(stat: &Stat) -> String {
++        format!("{}:{}", stat.st_dev as u64, stat.st_ino as u64)
 +    }
 +
 +    /// Device and inode together identify the entry without pinning document content.
@@ -2055,6 +2279,58 @@ index 0000000..adfa274
 +            assert_comments(&loaded, &comments(&path));
 +        }
 +
++        #[test]
++        fn read_original_and_parent_id_are_bound_to_the_held_parent() {
++            use std::os::unix::fs::{MetadataExt, symlink};
++            let root = tempfile::tempdir().unwrap();
++            let parent = root.path().join("current");
++            fs::create_dir(&parent).unwrap();
++            let path = original(&parent);
++            let other = root.path().join("B.md");
++            fs::write(&other, b"other document").unwrap();
++            let (document, _) = Document::open(&path).unwrap();
++            let none = |_: usize| false;
++            assert_eq!(document.read_original(none).unwrap().unwrap(), b"original body\n");
++            assert_eq!(document.read_original(|len| len > 4).unwrap(), None, "over budget");
++            let meta = fs::metadata(&parent).unwrap();
++            assert_eq!(document.parent_id().unwrap(), format!("{}:{}", meta.dev(), meta.ino()));
++
++            // Same-parent atomic replacement is followed.
++            let temp = parent.join("editor.tmp");
++            fs::write(&temp, b"edited").unwrap();
++            fs::rename(&temp, &path).unwrap();
++            assert_eq!(document.read_original(none).unwrap().unwrap(), b"edited");
++
++            // A symlinked original or a FIFO in the held parent is refused.
++            fs::remove_file(&path).unwrap();
++            symlink(&other, &path).unwrap();
++            assert!(document.read_original(none).is_err());
++            fs::remove_file(&path).unwrap();
++            rustix::fs::mknodat(rustix::fs::CWD, &path, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0)
++                .unwrap();
++            assert!(document.read_original(none).is_err(), "never blocks on a FIFO");
++            fs::remove_file(&path).unwrap();
++            fs::write(&path, b"restored").unwrap();
++            assert_eq!(document.read_original(none).unwrap().unwrap(), b"restored");
++
++            // A real replacement directory hard-linking B under the same spelling.
++            let held_id = document.parent_id().unwrap();
++            fs::rename(&parent, root.path().join("moved")).unwrap();
++            fs::create_dir(&parent).unwrap();
++            fs::hard_link(&other, &path).unwrap();
++            let error = format!("{:#}", document.read_original(none).unwrap_err());
++            assert!(error.contains("parent directory changed"), "{error}");
++            assert!(document.verify_location().is_err());
++            assert_eq!(document.parent_id().unwrap(), held_id, "identity stays the held fd's");
++            // And a parent swapped to a symlink at a directory with the same basename.
++            fs::remove_dir_all(&parent).unwrap();
++            let elsewhere = root.path().join("elsewhere");
++            fs::create_dir(&elsewhere).unwrap();
++            fs::write(elsewhere.join(path.file_name().unwrap()), b"elsewhere").unwrap();
++            symlink(&elsewhere, &parent).unwrap();
++            assert!(document.read_original(none).is_err());
++        }
++
 +        #[cfg(unix)]
 +        #[test]
 +        fn private_snapshot_and_lock_permissions() {
@@ -2092,6 +2368,24 @@ index 0000000..adfa274
 +
 +    /// Never fall back to unsafe pathname-based persistence on unsupported systems.
 +    pub fn save(&self, _comments: &crate::model::CommentStore) -> anyhow::Result<()> {
++        anyhow::bail!("document mode requires Unix directory-relative filesystem operations")
++    }
++
++    /// Never fall back to an unbound pathname read on unsupported systems.
++    pub fn read_original(
++        &self,
++        _over_budget: impl Fn(usize) -> bool,
++    ) -> anyhow::Result<Option<Vec<u8>>> {
++        anyhow::bail!("document mode requires Unix directory-relative filesystem operations")
++    }
++
++    /// No held parent identity exists on unsupported systems.
++    pub fn parent_id(&self) -> anyhow::Result<String> {
++        anyhow::bail!("document mode requires Unix directory-relative filesystem operations")
++    }
++
++    /// No held parent exists to verify on unsupported systems.
++    pub fn verify_location(&self) -> anyhow::Result<()> {
 +        anyhow::bail!("document mode requires Unix directory-relative filesystem operations")
 +    }
 +}
@@ -2147,7 +2441,7 @@ index 53f9c6c..0523984 100644
      fn find_defaults_to_the_ctrl_f_chord() {
          let keymap = Keymap::default();
 diff --git a/src/lib.rs b/src/lib.rs
-index 134b26a..5641452 100644
+index 134b26a..c35c17e 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -13,6 +13,7 @@ pub mod azure_devops;
@@ -2201,7 +2495,7 @@ index 134b26a..5641452 100644
          if let Err(error) = terminal.draw(|f| ui::render(f, &app)) {
              restore_terminal(kbd);
              herdr::clear_pane_label();
-@@ -164,35 +181,84 @@ fn repo_root(cfg: &Config) -> std::path::PathBuf {
+@@ -164,35 +181,85 @@ fn repo_root(cfg: &Config) -> std::path::PathBuf {
  /// The startup app for one config snapshot: ready on `Ok`, blocked with the error on
  /// `Err`. Both the env-resolved build and the post-paint CLI-resolved rebuild go through
  /// here, so the two paths cannot drift.
@@ -2293,7 +2587,8 @@ index 134b26a..5641452 100644
 +fn poll_app(app: &mut App, pr: &mut PrCoordinator) {
 +    if app.is_document() {
 +        if let Err(error) = app.reload() {
-+            app.status = format!("refresh failed: {error}");
++            // Show the cause chain, e.g. a refused replaced parent, not just the context.
++            app.status = format!("refresh failed: {error:#}");
 +        }
 +    } else {
 +        schedule_poll_probe(pr, app.tab);
@@ -2302,7 +2597,7 @@ index 134b26a..5641452 100644
  }
  
  /// A transient status message (e.g. "sent 3 comments") fades after this long idle.
-@@ -596,6 +662,10 @@ pub fn land_world_completion(
+@@ -596,6 +663,10 @@ pub fn land_world_completion(
      completion: crate::world::WorldCompletion,
      generation: u64,
  ) -> bool {
@@ -2313,7 +2608,7 @@ index 134b26a..5641452 100644
      app.sync_turn_baseline(completion.input.turn_baseline.clone());
      if let Some(turn) = completion.turn.as_ref() {
          app.sync_agents_present(turn.agents_present);
-@@ -687,19 +757,21 @@ fn event_loop(
+@@ -687,19 +758,21 @@ fn event_loop(
      // a fresh probe proves its complete input still matches (`specs/forge-host.md`).
      let (probe_tx, probe_rx) =
          mpsc::channel::<(u64, Result<crate::forge::PrFetchInput, crate::forge::PrInputError>)>();
@@ -2342,7 +2637,7 @@ index 134b26a..5641452 100644
      let mut world_generation = 0_u64;
      let mut world_inflight: Option<(Instant, bool)> = None;
      // The search worker spawns on the first overlay open, so a session that never
-@@ -720,15 +792,30 @@ fn event_loop(
+@@ -720,15 +793,30 @@ fn event_loop(
      app.pr_pending = None;
      let result: Result<()> = (|| {
          while !app.should_quit {
@@ -2379,7 +2674,7 @@ index 134b26a..5641452 100644
                          Ok(_) => {}
                          Err(error) => {
                              let message = error.to_string();
-@@ -900,7 +987,10 @@ fn event_loop(
+@@ -900,7 +988,10 @@ fn event_loop(
  
              // Dispatch the queued refresh after the frame above painted, so a switch stays
              // instant and the fresh state lands behind it (specs/tui.md).
@@ -2391,7 +2686,7 @@ index 134b26a..5641452 100644
                  let request = app.world_request.take().expect("checked above");
                  world_generation = world_generation.wrapping_add(1);
                  let job = crate::world::WorldJob {
-@@ -927,10 +1017,12 @@ fn event_loop(
+@@ -927,10 +1018,12 @@ fn event_loop(
              // before it can paint, while the generation still coalesces repeated triggers into
              // one fresh fetch. Ambient triggers ride in-flight work and arm a trailing fetch
              // (`request_refresh`).
@@ -2406,7 +2701,7 @@ index 134b26a..5641452 100644
                  last_pr_poll = Instant::now();
                  pr.request_refresh(kind);
              }
-@@ -987,7 +1079,7 @@ fn event_loop(
+@@ -987,7 +1080,7 @@ fn event_loop(
                  }
              }
  
@@ -2415,7 +2710,7 @@ index 134b26a..5641452 100644
                  pr.probe_pending = false;
                  let (tx, repo, base, plugin_config, epoch) = (
                      probe_tx.clone(),
-@@ -1008,7 +1100,8 @@ fn event_loop(
+@@ -1008,7 +1101,8 @@ fn event_loop(
                  });
              }
  
@@ -2425,7 +2720,7 @@ index 134b26a..5641452 100644
                  && pr.active_probe_epoch.is_none()
                  && !pr.probe_pending
                  && let Some((generation, input)) = pr.refresh.take_fetch()
-@@ -1141,12 +1234,7 @@ fn event_loop(
+@@ -1141,12 +1235,7 @@ fn event_loop(
                      last_poll = Instant::now();
                      continue;
                  }
@@ -2439,7 +2734,7 @@ index 134b26a..5641452 100644
                  logln!(
                      "poll files={} composing={} diff_cursor={} scroll={}",
                      app.entries.len(),
-@@ -1196,6 +1284,10 @@ fn apply_pr_probe_result(
+@@ -1196,6 +1285,10 @@ fn apply_pr_probe_result(
      result: Result<crate::forge::PrFetchInput, crate::forge::PrInputError>,
      config_epoch: u64,
  ) -> bool {
@@ -2450,7 +2745,7 @@ index 134b26a..5641452 100644
      match result {
          Err(error) => {
              pr.refresh.probe_failed(pr.probe_pending);
-@@ -1255,7 +1347,7 @@ fn reconcile_plugin_config(
+@@ -1255,7 +1348,7 @@ fn reconcile_plugin_config(
      app: &mut App,
      cfg: &Config,
      config_epoch: &mut u64,
@@ -2459,7 +2754,7 @@ index 134b26a..5641452 100644
      recovery_inflight: &mut bool,
      pr: &mut PrCoordinator,
  ) -> ConfigGate {
-@@ -1270,7 +1362,7 @@ fn reconcile_plugin_config(
+@@ -1270,7 +1363,7 @@ fn reconcile_plugin_config(
      };
  
      let pr_changed = previous.forge_hosts() != current.forge_hosts();
@@ -2468,7 +2763,7 @@ index 134b26a..5641452 100644
          pr.config_changed(app.tab == crate::app::Tab::Pr);
      }
      if previous.theme() != current.theme() {
-@@ -1290,7 +1382,7 @@ fn observe_plugin_config(
+@@ -1290,7 +1383,7 @@ fn observe_plugin_config(
      app: &mut App,
      cfg: &Config,
      epoch: &mut u64,
@@ -2477,7 +2772,7 @@ index 134b26a..5641452 100644
      recovery_inflight: &mut bool,
  ) -> bool {
      apply_plugin_config_observation(
-@@ -1307,7 +1399,7 @@ fn apply_plugin_config_observation(
+@@ -1307,7 +1400,7 @@ fn apply_plugin_config_observation(
      app: &mut App,
      cfg: &Config,
      epoch: &mut u64,
@@ -2486,7 +2781,7 @@ index 134b26a..5641452 100644
      recovery_inflight: &mut bool,
      observed: Result<PluginConfig, config::PluginConfigError>,
  ) -> bool {
-@@ -1322,10 +1414,7 @@ fn apply_plugin_config_observation(
+@@ -1322,10 +1415,7 @@ fn apply_plugin_config_observation(
                      let (tx, cfg, target, recovery_epoch) =
                          (recovery_tx.clone(), cfg.clone(), next, *epoch);
                      thread::spawn(move || {
@@ -2498,7 +2793,7 @@ index 134b26a..5641452 100644
                          let _ = tx.send((recovery_epoch, target, recovered));
                      });
                  }
-@@ -1596,6 +1685,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) ->
+@@ -1596,6 +1686,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) ->
              K::BasePick => app.open_base_picker(),
              K::Select => app.toggle_select(),
              K::Comment => app.start_comment(),
@@ -2506,7 +2801,7 @@ index 134b26a..5641452 100644
              // `edit`/`delete` act on the comment under the diff cursor, so they only fire with
              // the diff focused — otherwise `delete` would silently drop a comment under an
              // off-screen cursor. (The comments-list overlay targets the highlighted row instead.)
-@@ -1740,6 +1830,12 @@ pub fn handle_mouse(
+@@ -1740,6 +1831,12 @@ pub fn handle_mouse(
          }
          return Ok(());
      }
@@ -2519,7 +2814,7 @@ index 134b26a..5641452 100644
      // A mouse gesture is one of the "any other input" that drops an armed crossing: the reviewer
      // who reaches for the mouse has left the file's edge behind (`specs/input.md`). Pointer motion
      // is not a gesture — capture reports every move over the pane, and a pointer resting on
-@@ -1881,6 +1977,189 @@ mod refresh_tests {
+@@ -1881,6 +1978,218 @@ mod refresh_tests {
      };
      use crate::app::{App, Tab};
  
@@ -2569,6 +2864,35 @@ index 134b26a..5641452 100644
 +        assert!(app.pr_pending.is_none());
 +        assert!(!pr.probe_pending);
 +        assert!(pr.refresh.take_fetch().is_none());
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn document_periodic_poll_refuses_replaced_parent_and_keeps_last_view() {
++        let dir = tempfile::tempdir().unwrap();
++        let other = dir.path().join("other.md");
++        std::fs::write(&other, "# Other\nforeign second\n").unwrap();
++        let current = dir.path().join("current");
++        std::fs::create_dir(&current).unwrap();
++        std::fs::write(current.join("A.md"), "# First\nsecond\nthird\n").unwrap();
++        let cfg = Config::parse([
++            "--file".to_string(),
++            current.join("A.md").display().to_string(),
++            "--line".to_string(),
++            "2".to_string(),
++        ])
++        .unwrap();
++        let mut app = ready_app(&cfg, crate::config::PluginConfig::default()).unwrap();
++        assert_eq!(app.visible[app.diff_cursor].text(), "second");
++        std::fs::rename(&current, dir.path().join("moved")).unwrap();
++        std::fs::create_dir(&current).unwrap();
++        std::fs::hard_link(&other, current.join("A.md")).unwrap();
++        let mut pr = PrCoordinator::new(false);
++        super::poll_app(&mut app, &mut pr);
++        assert!(app.status.starts_with("refresh failed:"), "{}", app.status);
++        assert!(app.status.contains("parent directory changed"), "{}", app.status);
++        assert!(!app.visible.iter().any(|row| row.text() == "foreign second"));
++        assert_eq!(app.visible[app.diff_cursor].text(), "second");
 +    }
 +
 +    #[test]
@@ -2709,7 +3033,7 @@ index 134b26a..5641452 100644
      #[test]
      fn the_indicator_lights_only_for_a_building_job_past_the_delay() {
          use std::time::Duration;
-@@ -2068,7 +2347,7 @@ mod refresh_tests {
+@@ -2068,7 +2377,7 @@ mod refresh_tests {
          let config_dir = tempfile::tempdir().unwrap();
          let path = config_dir.path().join("config.toml");
          std::fs::write(&path, "navigator_position = \"right\"\n").unwrap();
@@ -2718,7 +3042,7 @@ index 134b26a..5641452 100644
          let mut app = App::new(repo.path().to_path_buf(), Scope::Uncommitted, None);
          app.set_plugin_config(plugin_config_in(config_dir.path()).unwrap());
          let painted = PaintedFrameSnapshot::capture(&app);
-@@ -2582,7 +2861,7 @@ mod refresh_tests {
+@@ -2582,7 +2891,7 @@ mod refresh_tests {
          let repo = tempfile::tempdir().unwrap();
          let config_dir = tempfile::tempdir().unwrap();
          std::fs::write(config_dir.path().join("config.toml"), "auto_open = false\n").unwrap();
@@ -2727,7 +3051,7 @@ index 134b26a..5641452 100644
          let mut app = App::new(repo.path().to_path_buf(), Scope::Uncommitted, None);
          let (tx, _rx) = mpsc::channel();
          let mut epoch = 0;
-@@ -2621,8 +2900,8 @@ mod refresh_tests {
+@@ -2621,8 +2930,8 @@ mod refresh_tests {
          let config_dir = tempfile::tempdir().unwrap();
          let path = config_dir.path().join("config.toml");
          std::fs::write(&path, "default_scope = \"branch\"\n").unwrap();
@@ -2738,7 +3062,7 @@ index 134b26a..5641452 100644
          assert_eq!(app.scope, Scope::Branch, "startup seeds the configured scope");
  
          // The user switches in-session; a reread with a different default must not move it.
-@@ -2649,7 +2928,7 @@ mod refresh_tests {
+@@ -2649,7 +2958,7 @@ mod refresh_tests {
          let config_dir = tempfile::tempdir().unwrap();
          let path = config_dir.path().join("config.toml");
          std::fs::write(&path, "unknown = true\n").unwrap();
@@ -2747,7 +3071,7 @@ index 134b26a..5641452 100644
          let mut app = App::new(repo.path().to_path_buf(), Scope::Uncommitted, None);
          let (tx, rx) = mpsc::channel();
          let mut epoch = 0;
-@@ -2679,6 +2958,6 @@ mod refresh_tests {
+@@ -2679,6 +2988,6 @@ mod refresh_tests {
              rx.recv_timeout(Duration::from_secs(5)).expect("recovery worker");
          assert_eq!(recovery_epoch, epoch);
          assert_eq!(target.theme(), "gruvbox");

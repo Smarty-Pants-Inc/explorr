@@ -412,6 +412,9 @@ type App struct {
 	// Their shared publishers/store stay nil so they cannot overwrite another editor's state.
 	// Root containment and sequence floors cannot attribute a sibling's fresh request.
 	isolated bool
+	// expectParent is the caller-verified parent identity the initial isolated
+	// tab must hold; nil once construction finishes.
+	expectParent *editor.ParentID
 
 	rootDir   string
 	tree      *filetree.Tree
@@ -777,7 +780,7 @@ func NewSingleFile(filePath string) (*App, error) {
 
 // NewSingleFileAt opens one file and places the cursor at a 1-based location.
 func NewSingleFileAt(filePath string, line, col int) (*App, error) {
-	return newSingleFileAt(filePath, line, col, false)
+	return newSingleFileAt(filePath, line, col, false, nil)
 }
 
 // NewIsolatedSingleFileAt opens a dedicated link/edit pane at a 1-based location.
@@ -785,12 +788,27 @@ func NewSingleFileAt(filePath string, line, col int) (*App, error) {
 // state; explicit user actions (including navigation and debugging) remain available.
 // Editable files bind their loaded identity; read-only previews need no binding.
 func NewIsolatedSingleFileAt(filePath string, line, col int) (*App, error) {
-	return newSingleFileAt(filePath, line, col, true)
+	return newSingleFileAt(filePath, line, col, true, nil)
+}
+
+// NewIsolatedSingleFileAtExpectingParent is NewIsolatedSingleFileAt for callers
+// that already verified the file's parent directory (Reviewr's edit helper):
+// parentID is the decimal DEV:INO they checked. The constructor fails closed
+// (nil app, error, no tab registered) unless the tab's HELD parent descriptor
+// has exactly that identity, so a parent replaced after the caller's check is
+// never opened. Read-only previews cannot be bound and therefore always fail.
+func NewIsolatedSingleFileAtExpectingParent(filePath string, line, col int, parentID string) (*App, error) {
+	want, err := editor.ParseParentID(parentID)
+	if err != nil {
+		return nil, err
+	}
+	return newSingleFileAt(filePath, line, col, true, &want)
 }
 
 // newSingleFileAt establishes channel ownership before bootstrap or opening a tab.
 // Isolated panes keep breakpoint/debug models local, without shared persistence.
-func newSingleFileAt(filePath string, line, col int, isolated bool) (*App, error) {
+// expect, when non-nil, applies only to this initial open (see openFile).
+func newSingleFileAt(filePath string, line, col int, isolated bool, expect *editor.ParentID) (*App, error) {
 	th := theme.Default()
 	scr, err := newScreen(th)
 	if err != nil {
@@ -803,9 +821,10 @@ func newSingleFileAt(filePath string, line, col int, isolated bool) (*App, error
 	}
 
 	a := &App{
-		screen:   scr,
-		theme:    th,
-		isolated: isolated,
+		screen:       scr,
+		theme:        th,
+		isolated:     isolated,
+		expectParent: expect,
 		// Absolute for the same reason as above; single-file mode has no tree to borrow it from.
 		rootDir:        absOr(rootDir),
 		lastDebugSeq:   debugRequestFloor,
@@ -826,7 +845,10 @@ func newSingleFileAt(filePath string, line, col int, isolated bool) (*App, error
 	// openFile loads the file's git gutter markers itself (a file-scoped
 	// `git diff`), so single-file mode shows change bars on open without
 	// the whole-repo status or tree walk that New performs.
-	if err := a.openFileAt(filePath, line, col); err != nil {
+	err = a.openFileAt(filePath, line, col)
+	// One-shot: later explicit navigation opens other files in other parents.
+	a.expectParent = nil
+	if err != nil {
 		a.Close()
 		return nil, err
 	}
@@ -2418,6 +2440,16 @@ func (a *App) openFile(path string) error {
 			return err
 		}
 	}
+	// A caller-verified parent must be the one actually HELD, checked before
+	// the tab is registered or handed to git/LSP. Unbound previews fail.
+	if a.isolated && a.expectParent != nil {
+		if err := checkExpectedParent(t, *a.expectParent); err != nil {
+			_ = t.Close()
+			err = fmt.Errorf("cannot open %s: %w", path, err)
+			a.flash(fmt.Sprintf("Error: %v", err))
+			return err
+		}
+	}
 	a.tabs = append(a.tabs, t)
 	a.activeTab = len(a.tabs) - 1
 	a.refreshTabGitState(t)
@@ -2819,6 +2851,10 @@ func (a *App) runCustomAction(idx int) {
 		return
 	}
 	act := a.customActions[idx]
+	// User shell receives $FILE as a mutable pathname Explorr cannot bind.
+	if a.refuseIsolated(act.Label) {
+		return
+	}
 
 	// No "is a file open?" guard: custom actions are user-defined
 	// shell, and we don't second-guess what their command line
@@ -2840,6 +2876,10 @@ func (a *App) runCustomAction(idx int) {
 // runCustomAction so both the prompt-less and prompted paths share
 // the env-var, logging, and event-posting wiring without diverging.
 func (a *App) execCustomAction(act customactions.Action, promptValues map[string]string) {
+	// Final point: a prompt form opened before the refusal still cannot run.
+	if a.refuseIsolated(act.Label) {
+		return
+	}
 	vars := a.captureActionVars()
 	env := append(os.Environ(), vars.envSlice()...)
 	env = append(env, promptValuesEnv(act.Prompts, promptValues)...)

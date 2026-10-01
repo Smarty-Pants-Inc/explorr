@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -174,4 +175,14 @@ func (b *boundOriginal) reload(path string, allowRebind bool) ([]byte, os.FileIn
 	b.original, b.originalInfo = f, info
 	keep = true
 	return data, info, nil
+}
+
+// parentID reads DEV:INO from the held parent's FileInfo, captured by fstat on
+// the retained descriptor. uint64(st.Dev) is the shared contract's formatting.
+func (b *boundOriginal) parentID() (ParentID, error) {
+	st, ok := b.parentInfo.Sys().(*syscall.Stat_t)
+	if !ok || st == nil {
+		return ParentID{}, fmt.Errorf("parent identity is unavailable")
+	}
+	return ParentID{Dev: uint64(st.Dev), Ino: uint64(st.Ino)}, nil
 }

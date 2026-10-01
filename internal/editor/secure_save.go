@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
+	"strings"
 )
 
 // boundOriginal pins both objects, preventing inode reuse while the tab is open.
@@ -55,6 +57,64 @@ func (t *Tab) Close() error {
 	}
 	t.original.closed = true
 	return errors.Join(t.original.original.Close(), t.original.parent.Close())
+}
+
+// ParentID is a directory identity in the cross-language DEV:INO contract
+// shared with Reviewr and its edit helper: decimal, both fields unsigned 64-bit
+// (Go uint64(st.Dev), uint64(st.Ino)).
+type ParentID struct {
+	Dev uint64
+	Ino uint64
+}
+
+// String formats the identity as decimal DEV:INO.
+func (p ParentID) String() string {
+	return strconv.FormatUint(p.Dev, 10) + ":" + strconv.FormatUint(p.Ino, 10)
+}
+
+// ParseParentID accepts exactly ^[0-9]+:[0-9]+$ with each field fitting in
+// uint64. Signs, spaces, prefixes and overflow are rejected, never normalised.
+func ParseParentID(s string) (ParentID, error) {
+	dev, ino, ok := strings.Cut(s, ":")
+	if !ok || !parentIDDigits(dev) || !parentIDDigits(ino) {
+		return ParentID{}, fmt.Errorf("invalid parent identity %q: want DEV:INO", s)
+	}
+	d, err := strconv.ParseUint(dev, 10, 64)
+	if err != nil {
+		return ParentID{}, fmt.Errorf("invalid parent identity %q: %w", s, err)
+	}
+	i, err := strconv.ParseUint(ino, 10, 64)
+	if err != nil {
+		return ParentID{}, fmt.Errorf("invalid parent identity %q: %w", s, err)
+	}
+	return ParentID{Dev: d, Ino: i}, nil
+}
+
+// parentIDDigits reports whether s is a non-empty run of ASCII digits.
+func parentIDDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// BoundParentID returns the identity of the parent directory this tab HOLDS
+// open (fstat at bind time), not a fresh pathname lookup. Unbound, failed or
+// closed bindings, and unsupported platforms, return an error: callers that
+// expect a parent must fail closed.
+func (t *Tab) BoundParentID() (ParentID, error) {
+	if !t.originalBound || t.original == nil {
+		return ParentID{}, fmt.Errorf("tab has no bound original parent")
+	}
+	if t.original.closed {
+		return ParentID{}, fmt.Errorf("original binding is closed")
+	}
+	return t.original.parentID()
 }
 
 // readTabFile captures identity and contents from the SAME opened file. Ordinary

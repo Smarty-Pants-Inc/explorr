@@ -569,6 +569,47 @@ func TestResolveArgs_SingleFileAtCarriesPosition(t *testing.T) {
 	}
 }
 
+// TestResolveArgs_SingleFileAtExpectParent parses the shared DEV:INO contract
+// only as the trailing option of --single-file-at, and rejects it elsewhere.
+func TestResolveArgs_SingleFileAtExpectParent(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "target.md")
+	if err := os.WriteFile(file, []byte("target"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := resolveArgs([]string{"--single-file-at", file, "3", "5", "--expect-parent", "2049:18446744073709551615"})
+	if got.Err != nil || !got.Isolated || got.OpenFile != file || got.OpenLine != 3 || got.OpenCol != 5 ||
+		got.ExpectParent != "2049:18446744073709551615" {
+		t.Fatalf("resolved to %+v", got)
+	}
+	if got := resolveArgs([]string{"--single-file-at", file, "3", "5"}); got.Err != nil || got.ExpectParent != "" {
+		t.Fatalf("without --expect-parent: %+v", got)
+	}
+	for _, args := range [][]string{
+		{"--single-file-at", file, "3", "5", "--expect-parent"},
+		{"--single-file-at", file, "3", "5", "--expect-parent", ""},
+		{"--single-file-at", file, "3", "5", "--expect-parent", "12"},
+		{"--single-file-at", file, "3", "5", "--expect-parent", "1:2:3"},
+		{"--single-file-at", file, "3", "5", "--expect-parent", "-1:2"},
+		{"--single-file-at", file, "3", "5", "--expect-parent", "1:x"},
+		{"--single-file-at", file, "3", "5", "--expect-parent", "18446744073709551616:1"},
+		{"--single-file-at", file, "3", "5", "--expect", "1:2"},
+		{"--single-file-at", file, "3", "5", "--expect-parent", "1:2", "extra"},
+		{"--single-file-at", file, "--expect-parent", "1:2", "3", "5"},
+		{"--expect-parent", "1:2", "--single-file-at", file, "3", "5"},
+		{"--expect-parent", "1:2"},
+		{file, "--expect-parent", "1:2"},
+		{"--open-at", file, "--expect-parent", "1:2"},
+		{"--explorer", dir, "--expect-parent", "1:2"},
+		{"--debug", "start", "--expect-parent", "1:2"},
+		{"--herdr-open", "file://" + file, "--expect-parent", "1:2"},
+	} {
+		if got := resolveArgs(args); got.Err == nil {
+			t.Errorf("accepted %q: %+v", args, got)
+		}
+	}
+}
+
 // TestResolveArgs_IsolationOnlyForDedicatedLinks keeps ordinary filename,
 // project, --open-at and debug invocations on their existing integration path.
 func TestResolveArgs_IsolationOnlyForDedicatedLinks(t *testing.T) {

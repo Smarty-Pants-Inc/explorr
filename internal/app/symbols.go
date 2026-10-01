@@ -208,6 +208,9 @@ func (a *App) handleWorkspaceSymbols(e *workspaceSymbolsEvent) {
 // lightbulb, which is the icon VS Code uses for exactly this.
 func (a *App) menuCodeActions() {
 	a.closeMenu()
+	if a.refuseIsolated("Fix at cursor") {
+		return
+	}
 	path, pos, ok := a.lspCursorPos()
 	if !ok {
 		a.flash("No language server for this file")
@@ -239,6 +242,9 @@ func (a *App) menuCodeActions() {
 // handleCodeActions offers the fixes through the palette and applies the chosen
 // one with the same disk-writing path a rename uses.
 func (a *App) handleCodeActions(e *codeActionsEvent) {
+	if a.refuseIsolated("Fix at cursor") {
+		return
+	}
 	if len(e.actions) == 0 {
 		a.flash("No fixes available here")
 		return
@@ -257,21 +263,12 @@ func (a *App) handleCodeActions(e *codeActionsEvent) {
 					app.flash("Save first — a fix rewrites files on disk")
 					return
 				}
-				files, count, err := applyWorkspaceEdits(edits)
-				if err != nil {
-					app.flash("Fix failed: " + err.Error())
-					return
-				}
-				for _, t := range app.tabs {
-					if t.Path == "" || t.Synthetic {
-						continue
+				app.applyEditsAndReload(edits, "Fix at cursor", func(files, count int, err error) string {
+					if err != nil {
+						return "Fix failed: " + err.Error()
 					}
-					if _, touched := edits[t.Path]; touched {
-						_ = t.Reload()
-					}
-				}
-				app.refreshGitStatus()
-				app.flash(fmt.Sprintf("%s — %d edit(s) in %d file(s)", title, count, files))
+					return fmt.Sprintf("%s — %d edit(s) in %d file(s)", title, count, files)
+				})
 			},
 		})
 	}

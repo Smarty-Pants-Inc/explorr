@@ -104,14 +104,22 @@ the new pane to interact with it. Installing/building alone opens nothing.
 
 In patched document mode, the visible **Edit original** footer action (also
 uppercase `E`) launches the `herdr-review-edit-original` helper beside the installed
-Reviewr binary with the canonical source file, selected current source line, and column `1`.
+Reviewr binary with the canonical source file, selected current source line, column `1`, and
+the `DEV:INO` identity of the directory Reviewr holds open. Reviewr first checks that this held
+directory is still the one at the document's path. The helper checks it again, and passes it to
+`explorr --single-file-at FILE LINE COL --expect-parent DEV:INO`, which refuses to open unless
+its own bound directory is that same one. A directory replaced after review is refused at every
+step instead of opening a different same-named file.
 This does not depend on the new pane inheriting the link action's PATH. Lowercase `e` still edits a
 review comment. The source opens as a native, single-file Explorr editor in
 another explicit, unfocused right split. Reviewr remains the read/review pane;
 it does not write the original. Removed historical lines are not valid current
 source edit targets. A failed launch is shown as an error, not reported as a
-successful edit. Dedicated native editors reject global open/debug panel requests and do not
-publish shared editor state. Text saves bind the original file and parent directory; replacing
+successful edit. Refresh reads the document through the held directory too, so a replaced
+directory shows an error instead of another file's contents. Dedicated native editors reject
+global open/debug panel requests and do not publish shared editor state. They edit only that one
+file: rename symbol, workspace-wide fixes, and file create/rename/delete are refused there with a
+message. Text saves bind the original file and parent directory; replacing
 either makes Save fail while retaining the dirty buffer. Automatic path-based format-on-save
 is disabled in these panes, without changing ordinary project editors.
 

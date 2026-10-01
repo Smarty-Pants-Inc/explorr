@@ -76,11 +76,20 @@ class OpenFileTests(unittest.TestCase):
         path.write_text(text)
         path.chmod(0o755)
 
-    def invoke(self, file=None, line='2', col='13', edit=False):
-        """Run the named public helper with the isolated fixture environment."""
+    def invoke(self, file=None, line='2', col='13', edit=False, parent=None):
+        """Run the named public helper with the isolated fixture environment.
+
+        Edit mode passes Reviewr's held-parent DEV:INO, by default the real one."""
         name = 'herdr-review-edit-original' if edit else 'herdr-review-last-markdown'
-        return subprocess.run([str(self.launch / name), str(file or self.file), line, col],
-                              env=self.env, capture_output=True, text=True)
+        argv = [str(self.launch / name), str(file or self.file), line, col]
+        if edit:
+            argv.append(parent or self.parent_id((file or self.file).resolve().parent))
+        return subprocess.run(argv, env=self.env, capture_output=True, text=True)
+
+    @staticmethod
+    def parent_id(directory):
+        info = os.stat(directory)
+        return f'{info.st_dev & 0xFFFFFFFFFFFFFFFF}:{info.st_ino}'
 
     def calls(self):
         """Read exact manager argv, preserving shell metacharacters."""
@@ -193,9 +202,41 @@ class OpenFileTests(unittest.TestCase):
         result = self.invoke(edit=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(self.program_log.read_text()),
-                         [str(self.explorr), '--single-file-at', str(self.file), '2', '13'])
+                         [str(self.explorr), '--single-file-at', str(self.file), '2', '13',
+                          '--expect-parent', self.parent_id(self.file.parent)])
         self.assertNotIn('--open-at', self.calls()[1][3])
         self.assertNotIn('--herdr-open', self.calls()[1][3])
+
+    def test_edit_refuses_replaced_parent_before_split(self):
+        # Reviewr verified and holds current/; a new directory now sits at that path
+        # with a different same-named document. The helper must not launch it.
+        current = self.base / 'current'
+        current.mkdir()
+        document = current / 'A.md'
+        document.write_text('reviewed document')
+        held = self.parent_id(current)
+        current.rename(self.base / 'moved')
+        current.mkdir()
+        document.write_text('different document at the same pathname')
+        result = self.invoke(file=document, edit=True, parent=held)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('directory was replaced', result.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_edit_requires_well_formed_parent_identity(self):
+        for parent in ['', '1', '1:', ':2', '1:2:3', '-1:2', '1:2\n', '1:2; touch bad']:
+            with self.subTest(parent=parent):
+                result = subprocess.run([str(self.launch / 'herdr-review-edit-original'),
+                                         str(self.file), '2', '13', parent],
+                                        env=self.env, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.calls(), [])
+        result = subprocess.run([str(self.launch / 'herdr-review-edit-original'),
+                                 str(self.file), '2', '13'], env=self.env,
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('PARENT_ID', result.stderr)
+        self.assertEqual(self.calls(), [])
 
     def test_plugin_bin_and_absolute_explorr_override(self):
         self.explorr.unlink()
