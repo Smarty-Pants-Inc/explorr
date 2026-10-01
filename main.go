@@ -138,8 +138,8 @@ func unsafeFileURLText(text string) bool {
 
 // fileURLPositionValue accepts ASCII digits only, matching OSC8 #line links.
 func fileURLPositionValue(raw, name string) (int, error) {
-	if len(raw) == 0 || len(raw) > 9 || strings.ContainsFunc(raw, func(r rune) bool { return r < '0' || r > '9' }) {
-		return 0, fmt.Errorf("%s must be 1–9 ASCII digits", name)
+	if len(raw) == 0 || strings.ContainsFunc(raw, func(r rune) bool { return r < '0' || r > '9' }) {
+		return 0, fmt.Errorf("%s must be ASCII digits", name)
 	}
 	return positivePosition(raw, name)
 }
@@ -226,7 +226,11 @@ func parseLocalFileURLForHosts(raw string, hosts map[string]bool) (string, int, 
 		}
 		// Use the encoded spelling so percent-encoded fragment digits are not
 		// silently accepted where smarty.file-links requires ASCII digits.
-		line, err = fileURLPositionValue(parsed.EscapedFragment(), "line fragment")
+		fragment := parsed.EscapedFragment()
+		if len(fragment) > 9 {
+			return "", 0, 0, false, errors.New("line fragment must be at most 9 digits")
+		}
+		line, err = fileURLPositionValue(fragment, "line fragment")
 		if err != nil {
 			return "", 0, 0, false, err
 		}

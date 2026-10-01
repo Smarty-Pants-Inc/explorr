@@ -216,6 +216,7 @@ func TestParseLocalFileURLHappyPaths(t *testing.T) {
 				{"line=12&col=3", "", 12, 3},
 				{"col=3", "42", 42, 3},
 				{"line=12", "", 12, 1},
+				{"line=1000000000&col=1000000000", "", 1000000000, 1000000000},
 			} {
 				u := (&url.URL{Scheme: "file", Host: host, Path: clicked, RawQuery: position.query, Fragment: position.fragment}).String()
 				path, line, col, review, err := parseLocalFileURLForHosts(u, hosts)
@@ -264,7 +265,7 @@ func TestParseLocalFileURLRejectsUnsafeVariants(t *testing.T) {
 		"?review=1&review=1", "?review=1&review=0",
 		"?line", "?line=", "?col=", "?line=0", "?col=0",
 		"?line=-1", "?line=%2B1", "?line=1.5", "?col=one",
-		"?line=١", "?line=1000000000", "?line=99999999999999999999",
+		"?line=١", "?line=99999999999999999999",
 		"?line=1&line=1", "?line=1&line=2", "?col=1&col=1",
 		"?line=1;col=2", "?line=%ZZ", "?line=1&%6cine=2",
 		"#", "#0", "#-1", "#+1", "#1.5", "#١", "#%34%32", "#1000000000",

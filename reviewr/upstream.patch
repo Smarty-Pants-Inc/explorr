@@ -1,0 +1,2449 @@
+diff --git a/src/app.rs b/src/app.rs
+index 49829b8..9986f8e 100644
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -8,7 +8,7 @@
+ use std::collections::{HashMap, HashSet};
+ use std::path::PathBuf;
+ 
+-use anyhow::Result;
++use anyhow::{Context, Result, bail};
+ 
+ use crate::diff::{DiffCache, FileDiff, Row, View};
+ use crate::export::{Agent, ExportTarget, format_all};
+@@ -343,6 +343,8 @@ pub enum FooterAction {
+     Select,
+     ClearSelection,
+     EditComment,
++    /// Open the current source file in an independent editor split.
++    EditOriginal,
+     DeleteComment,
+     JumpComment,
+     ExpandFold,
+@@ -430,6 +432,8 @@ pub enum Band {
+ #[derive(Debug)]
+ pub struct App {
+     pub repo: PathBuf,
++    /// An exact-file review and its held snapshot lock; absent for repository reviews.
++    pub document: Option<crate::document::Document>,
+     pub base: Option<String>,
+     /// The `branch` scope's base outcome, carried by the latest landed snapshot — the
+     /// header names its winner (or the skip) and the diff builds against the winner's OID
+@@ -656,6 +660,82 @@ impl App {
+         Self::build(repo, scope, base, true)
+     }
+ 
++    /// Review one exact file, independent of Git, with a durable comment snapshot.
++    pub fn new_document(path: PathBuf, line: u32) -> Result<Self> {
++        let (document, store) = crate::document::Document::open(&path)?;
++        let path = document.path();
++        let file = path.to_str().context("document path is not UTF-8")?.to_owned();
++        let repo = path.parent().context("document has no parent directory")?.to_path_buf();
++        let mut app = Self::build(repo, Scope::Uncommitted, None, false);
++        app.document = Some(document);
++        app.store = store;
++        app.tab = Tab::AllFiles;
++        app.active_file_tab = Tab::AllFiles;
++        app.focus = Focus::Diff;
++        app.entries = vec![Entry {
++            path: file.clone(),
++            previous_path: None,
++            annotation: None,
++            ignored: false,
++            is_dir: false,
++        }];
++        // A document is one leaf, not a repository tree rooted at its absolute path.
++        app.file_rows = vec![file_list::Row {
++            depth: 0,
++            name: path_basename(&file),
++            kind: RowKind::File { index: 0, annotation: None },
++            ignored: false,
++        }];
++        app.reload_document()?;
++        app.diff_cursor =
++            (line.saturating_sub(1) as usize).min(app.visible.len().saturating_sub(1));
++        app.reveal_diff = true;
++        Ok(app)
++    }
++
++    /// Whether this pane reviews an exact file rather than the Git worktree.
++    pub fn is_document(&self) -> bool {
++        self.document.is_some()
++    }
++
++    /// Reload the current document only; a modal keeps its frozen comment anchor.
++    fn reload_document(&mut self) -> Result<()> {
++        if self.mode.is_modal() {
++            return Ok(());
++        }
++        let document = self.document.as_ref().context("no document is open")?;
++        let path = document.path();
++        if path.canonicalize().context("locating document")? != path {
++            bail!("original document target has changed");
++        }
++        let metadata = std::fs::metadata(path).context("reading document metadata")?;
++        if !metadata.is_file() {
++            bail!("document is no longer a regular file");
++        }
++        let file = path.to_str().context("document path is not UTF-8")?.to_owned();
++        let (diff, content) = if crate::diff::over_byte_budget(metadata.len() as usize) {
++            (FileDiff::too_large_notice(file.clone()), String::new())
++        } else {
++            let bytes = std::fs::read(path).context("reading document")?;
++            let content = String::from_utf8_lossy(&bytes).into_owned();
++            let diff = self.cache.get_file(file.clone(), &content, &self.highlighter);
++            (diff, content)
++        };
++        self.diff_path = Some(file);
++        self.preview_text = if self.markdown_file() && diff.state == crate::diff::FileState::Normal
++        {
++            content
++        } else {
++            String::new()
++        };
++        self.diff = diff;
++        self.expanded_folds.clear();
++        self.rebuild_visible();
++        self.settle_read();
++        self.tab_visited = true;
++        Ok(())
++    }
++
+     /// Construct the error-only reviewr pane without reading repository state.
+     pub(crate) fn blocked(repo: PathBuf, scope: Scope, base: Option<String>) -> Self {
+         Self::build(repo, scope, base, false)
+@@ -669,6 +749,7 @@ impl App {
+         let theme = theme::resolve(None);
+         Self {
+             repo,
++            document: None,
+             base,
+             branch_base: git::BaseStatus::default(),
+             base_epoch: 0,
+@@ -840,6 +921,11 @@ impl App {
+     /// comments always survive; an in-progress draft keeps the exact frozen diff it was written
+     /// against, matching the ordinary refresh invariant.
+     pub(crate) fn carry_authored_state_from(&mut self, old: &mut Self) {
++        if old.is_document() {
++            // Move the existing lock, never reopen the sidecar during config recovery.
++            self.document = old.document.take();
++            self.repo = old.repo.clone();
++        }
+         self.store = std::mem::take(&mut old.store);
+         self.list_cursor = old.list_cursor;
+         // The footer expansion is one global toggle, carried regardless of the recovered mode
+@@ -867,8 +953,8 @@ impl App {
+             // before the mode is stored, so none reaches recovery; the search query is not
+             // restored and the picker's frozen rows are not either (specs/search.md,
+             // specs/find-in-file.md, specs/herdr-host.md).
+-            Mode::Normal | Mode::Search | Mode::Find | Mode::Picker => {}
+-            Mode::List | Mode::Composing { .. } | Mode::BasePick => {
++            Mode::Normal | Mode::Search | Mode::Find | Mode::Picker if !self.is_document() => {}
++            _ => {
+                 self.scope = old.scope;
+                 self.tab = old.tab;
+                 self.active_file_tab = old.active_file_tab;
+@@ -1015,6 +1101,9 @@ impl App {
+     /// "a comment is never lost to a refresh" invariant (`specs/overview.md`).
+     pub fn reload(&mut self) -> Result<()> {
+         self.ensure_config_ready()?;
++        if self.is_document() {
++            return self.reload_document();
++        }
+         // The PR tab holds its own state and renders nothing from the file tree, so a poll on
+         // it skips the rebuild; switching back to a file tab reloads it then (specs/tui.md).
+         if !self.tab.is_file_tab() {
+@@ -1073,6 +1162,9 @@ impl App {
+     /// Reconcile a built snapshot into the view — the one place a world result touches place
+     /// state, by identity first, then fallback, then clamp (`specs/overview.md` Continuity).
+     pub fn reconcile_world(&mut self, snapshot: crate::world::WorldSnapshot) {
++        if self.is_document() {
++            return;
++        }
+         // Keep the cursor on the same row target across the rebuild; fall back to the open
+         // file, then the first file. The toggled-directory set survives untouched.
+         let anchor = self.cursor_anchor();
+@@ -1132,6 +1224,12 @@ impl App {
+     /// `previous_path`), the whole-file content in `All files`. The one place this dispatch lives,
+     /// so opening a file from the tree and from a comment edit can't drift apart.
+     fn open_path_in_tab(&mut self, path: String, previous_path: Option<String>) {
++        if self.is_document() {
++            if let Err(error) = self.reload_document() {
++                self.status = format!("document reload failed: {error:#}");
++            }
++            return;
++        }
+         match self.tab {
+             Tab::AllFiles => self.set_file_view(&path),
+             // `Changes` (the `PR` tab never opens a file in the read pane).
+@@ -1353,6 +1451,13 @@ impl App {
+     /// `sample` rides the poll's status sample along; `reveal` re-reveals the cursor when
+     /// the result lands, for user-initiated switches only (specs/tui.md).
+     pub fn request_world_refresh(&mut self, sample_turn: bool, reveal: bool) {
++        if self.is_document() {
++            if let Err(error) = self.reload() {
++                self.status = format!("document reload failed: {error:#}");
++            }
++            self.reveal_diff |= reveal;
++            return;
++        }
+         let request = self.world_request.get_or_insert(crate::world::WorldRequest::default());
+         request.sample_turn |= sample_turn;
+         request.reveal |= reveal;
+@@ -1818,6 +1923,9 @@ impl App {
+     /// in progress is never stranded against a different diff.
+     pub fn set_scope(&mut self, scope: Scope) -> Result<()> {
+         self.ensure_config_ready()?;
++        if self.is_document() {
++            return Ok(());
++        }
+         if self.scope != scope && !self.composing() {
+             self.scope = scope;
+             self.rebase_changes()?;
+@@ -1872,6 +1980,9 @@ impl App {
+     /// Queue a PR refresh, merging into any request already pending: the stronger kind
+     /// wins, so an ambient trigger can never downgrade the user's commanded refresh.
+     pub fn request_pr_refresh(&mut self, kind: RefreshKind) {
++        if self.is_document() {
++            return;
++        }
+         self.pr_pending = self.pr_pending.max(Some(kind));
+     }
+ 
+@@ -1883,7 +1994,7 @@ impl App {
+     /// stays on the same side.
+     pub fn set_tab(&mut self, tab: Tab) -> Result<()> {
+         self.ensure_config_ready()?;
+-        if self.tab == tab || self.composing() {
++        if self.is_document() || self.tab == tab || self.composing() {
+             return Ok(());
+         }
+         self.tab = tab;
+@@ -2812,24 +2923,51 @@ impl App {
+             self.cancel_comment();
+             return;
+         }
+-        match editing {
++        let previous = self.is_document().then(|| self.store.clone());
++        let status = match editing {
+             Some(i) => {
+                 logln!("comment edit [{i}] :: {text}");
+                 self.store.edit(i, text);
+-                self.status = "comment updated".to_string();
++                "comment updated"
+             }
+             None => {
+                 if let Some(c) = self.build_comment(text) {
+                     logln!("comment add {} :: {}", c.location(), c.text);
+                     self.store.add(c);
+-                    self.status = "comment added".to_string();
++                    "comment added"
++                } else {
++                    if self.is_document() {
++                        self.status = "comment has no source anchor".to_string();
++                    } else {
++                        self.select_anchor = None;
++                        self.leave_compose();
++                    }
++                    return;
+                 }
+             }
++        };
++        if !self.save_document_comments(previous) {
++            return; // Keep the draft, caret, selection, and compose mode for retry.
+         }
++        self.status = status.to_string();
+         self.select_anchor = None;
+         self.leave_compose();
+     }
+ 
++    /// Commit a document mutation before acknowledging it, restoring the store on I/O failure.
++    fn save_document_comments(&mut self, previous: Option<CommentStore>) -> bool {
++        if let Some(document) = &self.document
++            && let Err(error) = document.save(&self.store)
++        {
++            if let Some(previous) = previous {
++                self.store = previous;
++            }
++            self.status = format!("comment save failed: {error:#}");
++            return false;
++        }
++        true
++    }
++
+     /// Whether the selection has at least one content row a comment can attach to —
+     /// a fold marker does not qualify.
+     fn has_anchorable_selection(&self) -> bool {
+@@ -2948,7 +3086,11 @@ impl App {
+         }
+         if let Some(i) = self.target_comment() {
+             logln!("comment delete [{i}]");
++            let previous = self.is_document().then(|| self.store.clone());
+             self.store.take(i);
++            if !self.save_document_comments(previous) {
++                return;
++            }
+             self.clamp_list_cursor();
+             self.status = "comment deleted".to_string();
+             // Don't strand the user in an empty "Comments (0)" overlay, matching `export`.
+@@ -2982,6 +3124,65 @@ impl App {
+         }
+     }
+ 
++    /// Open the current original through the installed split-local editor helper, by argv.
++    pub fn edit_original(&mut self) -> Result<()> {
++        // The new pane need not inherit the link action's plugin PATH. Resolve
++        // the helper beside this installed binary rather than another host tool.
++        let helper = std::env::current_exe()?
++            .parent()
++            .context("reviewr executable has no parent")?
++            .join("herdr-review-edit-original");
++        self.edit_original_with(helper.as_os_str())
++    }
++
++    /// Resolve the currently displayed new-side line, never a deleted or renamed old target.
++    fn original_edit_target(&self) -> Result<(PathBuf, u32)> {
++        let path = if let Some(document) = &self.document {
++            document.path().to_path_buf()
++        } else {
++            self.repo.join(self.diff_path.as_ref().context("no source file is open")?)
++        };
++        let canonical = path.canonicalize().context("locating original file")?;
++        if !canonical.is_file() {
++            bail!("original is not a regular file");
++        }
++        if self.is_document() && canonical != path {
++            bail!("original document target has changed");
++        }
++        let line = match self.visible.get(self.diff_cursor) {
++            Some(row) => row.new_no().context("removed lines have no current original line")?,
++            None if self.is_document() && self.visible.is_empty() => 1,
++            None => bail!("no current source line"),
++        };
++        Ok((canonical, line))
++    }
++
++    /// Run the helper and report a launch failure instead of pretending the original was edited.
++    fn edit_original_with(&mut self, helper: &std::ffi::OsStr) -> Result<()> {
++        if self.preview_active() {
++            self.return_from_preview();
++        }
++        let result = (|| {
++            self.ensure_config_ready()?;
++            let (file, line) = self.original_edit_target()?;
++            let output = std::process::Command::new(helper)
++                .arg(file)
++                .arg(line.to_string())
++                .arg("1")
++                .output()
++                .context("launching original editor")?;
++            if !output.status.success() {
++                bail!("original editor failed: {}", String::from_utf8_lossy(&output.stderr).trim());
++            }
++            Ok(())
++        })();
++        match &result {
++            Ok(()) => self.status = "opened original in editor".to_string(),
++            Err(error) => self.status = format!("edit original failed: {error:#}"),
++        }
++        result
++    }
++
+     // --- Search overlay (specs/search.md) ------------------------------------------------
+ 
+     /// The active scope's annotation for `path` — the search overlay's file rows wear the
+@@ -2992,6 +3193,9 @@ impl App {
+ 
+     /// `/`: open the search screen, from any tab, from either pane (specs/search.md).
+     pub fn open_search(&mut self) {
++        if self.is_document() {
++            return;
++        }
+         // A navigator-divider drag held from the review view must not become a search-split
+         // resize: cancel it so its remaining drag events are consumed, not acted on — the
+         // search divider only drags a gesture it started itself (specs/input.md).
+@@ -3275,6 +3479,9 @@ impl App {
+     /// pick lands the cursor on its line, clamped into the file's current length. A
+     /// vanished path opens nothing and the screen stays (specs/search.md).
+     pub fn search_open_pick(&mut self) -> Result<()> {
++        if self.is_document() {
++            return Ok(());
++        }
+         let Some(s) = self.search.as_ref() else { return Ok(()) };
+         // Off `Ready`, the painted screen shows no rows — held results are stale and
+         // invisible, so nothing opens (specs/search.md).
+@@ -3554,6 +3761,20 @@ impl App {
+             out.push((A::MoveFile, Move));
+             out.push((A::MovePage, Move));
+         }
++        if self.is_document() {
++            // An exact-file pane cannot navigate into a repository, another document, or a PR.
++            out.retain(|(action, _)| {
++                !matches!(
++                    action,
++                    A::Scope | A::ScopeOther | A::BasePick | A::Search | A::Tabs | A::MoveFile
++                )
++            });
++            if self.visible.get(self.diff_cursor).is_some_and(|row| row.new_no().is_some())
++                || (self.visible.is_empty() && self.diff.state == crate::diff::FileState::Normal)
++            {
++                out.push((A::EditOriginal, Do));
++            }
++        }
+         out
+     }
+ 
+@@ -3643,7 +3864,10 @@ impl App {
+     /// `--base` flag (`specs/input.md` Base picker).
+     #[must_use]
+     pub fn base_pick_available(&self) -> bool {
+-        self.tab.is_file_tab() && self.scope == Scope::Branch && self.base.is_none()
++        !self.is_document()
++            && self.tab.is_file_tab()
++            && self.scope == Scope::Branch
++            && self.base.is_none()
+     }
+ 
+     /// Open the base picker: one row per branch name, the open PR's target starred first,
+@@ -3765,7 +3989,9 @@ impl App {
+         logln!("export ({n}) -> {} ::\n{text}", target.label());
+         let delivered = match target.export(&text) {
+             Ok(()) => {
+-                self.store.take_all();
++                if !self.is_document() {
++                    self.store.take_all();
++                }
+                 self.status = target.success_message(n);
+                 logln!("export OK");
+                 true
+@@ -3923,6 +4149,11 @@ fn hunk_row(rows: &[Row], from: Option<usize>, forward: bool) -> Option<usize> {
+     }
+ }
+ 
++/// A document's single navigator leaf keeps only the human-readable filename.
++fn path_basename(path: &str) -> String {
++    std::path::Path::new(path).file_name().and_then(|name| name.to_str()).unwrap_or(path).to_owned()
++}
++
+ /// Whether `path` names a markdown file: a `.md`/`.markdown` extension,
+ /// case-insensitive (specs/diff-view.md).
+ fn is_markdown_path(path: &str) -> bool {
+@@ -4166,6 +4397,375 @@ mod tests {
+         assert_eq!(recovered.focus, crate::Focus::Diff, "and focus lands on the read pane");
+     }
+ 
++    /// A nested exact file, with no Git or environment-dependent fixture state.
++    fn document_fixture() -> (tempfile::TempDir, PathBuf) {
++        let dir = tempfile::tempdir().unwrap();
++        let parent = dir.path().join("current");
++        std::fs::create_dir(&parent).unwrap();
++        let path = parent.join("original ; $HOME.md");
++        std::fs::write(&path, "# title\nsecond\nthird\n").unwrap();
++        (dir, path)
++    }
++
++    /// Drive the public compose/submit hooks, not the store's lower-level mutation API.
++    fn add_document_comment(app: &mut App, text: &str) {
++        app.start_comment();
++        assert!(app.composing());
++        app.input_paste(text);
++        app.submit_comment();
++        assert!(!app.composing(), "{}", app.status);
++    }
++
++    /// Replace the snapshot's parent by a file to force a deterministic ENOTDIR save error.
++    fn break_document_parent(dir: &std::path::Path) {
++        std::fs::rename(dir.join("current"), dir.join("moved")).unwrap();
++        std::fs::write(dir.join("current"), "not a directory").unwrap();
++    }
++
++    /// Put the original parent back without altering the held lock or saved snapshot.
++    fn restore_document_parent(dir: &std::path::Path) {
++        std::fs::remove_file(dir.join("current")).unwrap();
++        std::fs::rename(dir.join("moved"), dir.join("current")).unwrap();
++    }
++
++    #[test]
++    fn document_opens_exact_non_git_and_git_file_at_requested_line() {
++        for in_repo in [false, true] {
++            let (dir, path) = document_fixture();
++            if in_repo {
++                assert!(
++                    std::process::Command::new("git")
++                        .args(["init", "-q"])
++                        .arg(dir.path())
++                        .status()
++                        .unwrap()
++                        .success()
++                );
++                std::fs::write(dir.path().join(".gitignore"), "current/\n").unwrap();
++                std::fs::write(dir.path().join("wrong.md"), "wrong document\n").unwrap();
++            }
++            let mut app = App::new_document(path.clone(), 2).unwrap();
++            let canonical = path.canonicalize().unwrap();
++            assert!(app.is_document());
++            assert_eq!(app.document.as_ref().unwrap().path(), canonical);
++            assert_eq!(app.diff_path.as_deref(), canonical.to_str());
++            assert_eq!(app.entries.len(), 1);
++            assert_eq!(app.entries[0].path, canonical.to_str().unwrap());
++            assert_eq!(app.file_rows.len(), 1);
++            assert_eq!(app.tab, super::Tab::AllFiles);
++            assert_eq!(app.focus, super::Focus::Diff);
++            assert_eq!(app.diff.view, crate::diff::View::File);
++            assert!(!app.preview_active(), "startup is source, even for markdown");
++            assert_eq!(app.visible.len(), 3);
++            assert_eq!(app.visible[app.diff_cursor].new_no(), Some(2));
++            assert_eq!(app.visible[app.diff_cursor].text(), "second");
++            app.set_scope(Scope::Branch).unwrap();
++            app.set_tab(super::Tab::Changes).unwrap();
++            app.set_tab(super::Tab::Pr).unwrap();
++            app.request_pr_refresh(super::RefreshKind::Forced);
++            app.open_search();
++            app.request_world_refresh(true, false);
++            app.reconcile_world(crate::world::WorldSnapshot {
++                entries: Vec::new(),
++                changed: std::collections::HashMap::new(),
++                branch_base: crate::git::BaseStatus::default(),
++            });
++            assert_eq!(app.tab, super::Tab::AllFiles);
++            assert_eq!(app.scope, Scope::Uncommitted);
++            assert!(app.pr_pending.is_none());
++            assert!(app.world_request.is_none());
++            assert!(app.search.is_none());
++            assert_eq!(app.diff_path.as_deref(), canonical.to_str());
++            assert_eq!(app.visible[app.diff_cursor].new_no(), Some(2));
++            let hints = app.footer_bands();
++            assert!(hints.iter().any(|(action, _)| *action == super::FooterAction::EditOriginal));
++            assert!(!hints.iter().any(|(action, _)| matches!(
++                action,
++                super::FooterAction::Scope
++                    | super::FooterAction::Tabs
++                    | super::FooterAction::Search
++                    | super::FooterAction::MoveFile
++            )));
++        }
++    }
++
++    #[test]
++    fn document_reload_uses_current_text_and_preserves_live_draft() {
++        let (_dir, path) = document_fixture();
++        let mut app = App::new_document(path.clone(), 2).unwrap();
++        std::fs::write(&path, "# title\nchanged\nthird\nfourth\n").unwrap();
++        app.reload().unwrap();
++        assert_eq!(app.visible[app.diff_cursor].text(), "changed");
++        app.start_comment();
++        app.input_paste("live draft");
++        std::fs::write(&path, "replacement\n").unwrap();
++        app.reload().unwrap();
++        assert_eq!(app.visible[app.diff_cursor].text(), "changed");
++        assert_eq!(app.input, "live draft");
++        app.cancel_comment();
++        app.reload().unwrap();
++        assert_eq!(app.visible.len(), 1);
++        assert_eq!(app.diff_cursor, 0);
++        assert_eq!(app.visible[0].text(), "replacement");
++        std::fs::remove_file(&path).unwrap();
++        assert!(app.reload().is_err());
++        assert_eq!(app.visible[0].text(), "replacement", "read errors preserve the last view");
++        assert!(app.original_edit_target().is_err(), "never open a deleted old target");
++    }
++
++    #[test]
++    fn document_cursor_clamps_zero_past_end_and_empty_files() {
++        let (_dir, path) = document_fixture();
++        for (line, expected) in [(0, 1), (999, 3)] {
++            let app = App::new_document(path.clone(), line).unwrap();
++            assert_eq!(app.visible[app.diff_cursor].new_no(), Some(expected));
++        }
++        std::fs::write(&path, "").unwrap();
++        let app = App::new_document(path, 999).unwrap();
++        assert!(app.visible.is_empty());
++        assert_eq!(app.diff_cursor, 0);
++        assert_eq!(app.original_edit_target().unwrap().1, 1);
++    }
++
++    #[test]
++    fn document_add_edit_delete_are_durable_and_never_write_original() {
++        let (_dir, path) = document_fixture();
++        let original = std::fs::read(&path).unwrap();
++        let mut app = App::new_document(path.clone(), 2).unwrap();
++        add_document_comment(&mut app, "first");
++        let comment = app.store.get(0).unwrap();
++        assert_eq!(comment.file, path.canonicalize().unwrap().to_str().unwrap());
++        assert_eq!((comment.start, comment.end), (2, 2));
++        assert!(!comment.diff_anchored);
++        drop(app);
++        let mut app = App::new_document(path.clone(), 2).unwrap();
++        assert_eq!(app.store.get(0).unwrap().text, "first");
++        app.start_edit();
++        app.input = "edited".to_owned();
++        app.caret = 6;
++        app.submit_comment();
++        assert_eq!(app.status, "comment updated");
++        drop(app);
++        let mut app = App::new_document(path.clone(), 2).unwrap();
++        assert_eq!(app.store.get(0).unwrap().text, "edited");
++        app.open_list();
++        app.delete_comment();
++        assert_eq!(app.status, "comment deleted");
++        assert_eq!(app.mode, Mode::Normal);
++        drop(app);
++        let app = App::new_document(path.clone(), 2).unwrap();
++        assert!(app.store.is_empty());
++        assert_eq!(std::fs::read(path).unwrap(), original);
++    }
++
++    #[test]
++    fn document_save_failures_roll_back_add_edit_delete_and_retain_draft() {
++        let (dir, path) = document_fixture();
++        let mut app = App::new_document(path.clone(), 2).unwrap();
++        app.toggle_select();
++        app.start_comment();
++        app.input_paste("unsaved draft");
++        let caret = app.caret;
++        let selection = app.select_anchor;
++        break_document_parent(dir.path());
++        app.submit_comment();
++        assert!(app.store.is_empty());
++        assert_eq!(app.mode, Mode::Composing { editing: None });
++        assert_eq!(app.input, "unsaved draft");
++        assert_eq!(app.caret, caret);
++        assert_eq!(app.select_anchor, selection);
++        assert!(app.status.starts_with("comment save failed:"));
++        restore_document_parent(dir.path());
++        app.submit_comment();
++        assert_eq!(app.store.get(0).unwrap().text, "unsaved draft");
++        app.start_edit();
++        app.input = "edited draft".to_owned();
++        app.caret = 4;
++        break_document_parent(dir.path());
++        app.submit_comment();
++        assert_eq!(app.store.get(0).unwrap().text, "unsaved draft");
++        assert_eq!(app.mode, Mode::Composing { editing: Some(0) });
++        assert_eq!(app.input, "edited draft");
++        assert_eq!(app.caret, 4);
++        assert!(app.status.starts_with("comment save failed:"));
++        restore_document_parent(dir.path());
++        app.submit_comment();
++        app.open_list();
++        break_document_parent(dir.path());
++        app.delete_comment();
++        assert_eq!(app.store.get(0).unwrap().text, "edited draft");
++        assert_eq!(app.mode, Mode::List);
++        assert_eq!(app.list_cursor, 0);
++        assert!(app.status.starts_with("comment save failed:"));
++        restore_document_parent(dir.path());
++        drop(app);
++        let app = App::new_document(path, 2).unwrap();
++        assert_eq!(app.store.get(0).unwrap().text, "edited draft");
++    }
++
++    /// A recording export target, to compare document snapshots with repo consumption.
++    struct DocumentExport {
++        fail: bool,
++        text: std::cell::RefCell<String>,
++    }
++
++    impl crate::export::ExportTarget for DocumentExport {
++        fn label(&self) -> &'static str {
++            "test"
++        }
++        fn success_message(&self, _: usize) -> String {
++            "delivered".to_owned()
++        }
++        fn failure_message(&self) -> String {
++            "failed".to_owned()
++        }
++        fn export(&self, text: &str) -> anyhow::Result<()> {
++            *self.text.borrow_mut() = text.to_owned();
++            if self.fail {
++                anyhow::bail!("injected export failure");
++            }
++            Ok(())
++        }
++    }
++
++    #[test]
++    fn document_exports_preserve_readable_snapshot_but_repo_exports_consume() {
++        let (_dir, path) = document_fixture();
++        let mut app = App::new_document(path.clone(), 2).unwrap();
++        add_document_comment(&mut app, "keep this");
++        app.open_list();
++        let target = DocumentExport { fail: false, text: std::cell::RefCell::default() };
++        assert!(app.export(&target));
++        assert_eq!(app.store.len(), 1);
++        assert_eq!(app.mode, Mode::List);
++        let first = target.text.borrow().clone();
++        assert!(first.contains("keep this"));
++        assert!(app.export(&target));
++        assert_eq!(*target.text.borrow(), first);
++        let failing = DocumentExport { fail: true, text: std::cell::RefCell::default() };
++        assert!(!app.export(&failing));
++        assert_eq!(app.store.len(), 1);
++        drop(app);
++        let mut app = App::new_document(path, 2).unwrap();
++        assert_eq!(app.store.get(0).unwrap().text, "keep this");
++        let mut repo_app = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
++        repo_app.store = std::mem::take(&mut app.store);
++        repo_app.open_list();
++        assert!(!repo_app.export(&failing));
++        assert_eq!(repo_app.store.len(), 1);
++        assert!(repo_app.export(&target));
++        assert!(repo_app.store.is_empty());
++        assert_eq!(repo_app.mode, Mode::Normal);
++    }
++
++    #[test]
++    fn document_startup_refuses_invalid_snapshots_without_repo_fallback_or_repair() {
++        let (_dir, path) = document_fixture();
++        let mut app = App::new_document(path.clone(), 2).unwrap();
++        add_document_comment(&mut app, "saved");
++        drop(app);
++        let sidecar = PathBuf::from(format!("{}.reviewr.json", path.display()));
++        let original = std::fs::read(&path).unwrap();
++        let saved = std::fs::read(&sidecar).unwrap();
++        let snapshot: serde_json::Value = serde_json::from_slice(&saved).unwrap();
++        let mut schema = snapshot.clone();
++        schema["schema_version"] = serde_json::json!(99);
++        let mut foreign = snapshot.clone();
++        foreign["document"] = serde_json::json!("/wrong/other-document.md");
++        for invalid in [
++            b"malformed snapshot".to_vec(),
++            serde_json::to_vec(&schema).unwrap(),
++            serde_json::to_vec(&foreign).unwrap(),
++        ] {
++            std::fs::write(&sidecar, &invalid).unwrap();
++            assert!(
++                App::new_document(path.clone(), 2).is_err(),
++                "an invalid explicit document never becomes a ready repository app"
++            );
++            assert_eq!(std::fs::read(&sidecar).unwrap(), invalid);
++            assert_eq!(std::fs::read(&path).unwrap(), original);
++        }
++        std::fs::write(&sidecar, saved).unwrap();
++        assert!(App::new_document(path, 2).is_ok(), "failed startup releases the lock");
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn document_alias_is_canonical_and_replaced_original_cannot_open_another_document() {
++        use std::os::unix::fs::symlink;
++        let (dir, path) = document_fixture();
++        let alias = dir.path().join("alias.md");
++        symlink(&path, &alias).unwrap();
++        let mut app = App::new_document(alias, 2).unwrap();
++        assert_eq!(app.diff_path.as_deref(), path.canonicalize().unwrap().to_str());
++        let other = dir.path().join("other.md");
++        std::fs::write(&other, "wrong document\n").unwrap();
++        std::fs::remove_file(&path).unwrap();
++        symlink(&other, &path).unwrap();
++        assert!(app.reload().is_err());
++        assert_eq!(app.visible[app.diff_cursor].text(), "second");
++        assert!(app.original_edit_target().is_err());
++    }
++
++    #[test]
++    fn document_config_recovery_moves_canonical_original_and_exclusive_lock() {
++        for composing in [false, true] {
++            let (_dir, path) = document_fixture();
++            let mut old = App::new_document(path.clone(), 2).unwrap();
++            add_document_comment(&mut old, "saved");
++            if composing {
++                old.start_edit();
++                old.input_paste(" draft");
++            }
++            old.set_config_error("bad config".to_owned());
++            assert!(App::new_document(path.clone(), 1).is_err(), "lock rejects a second app");
++            let mut recovered = App::blocked(PathBuf::from("wrong-repo"), Scope::Branch, None);
++            recovered.carry_authored_state_from(&mut old);
++            drop(old);
++            assert!(recovered.is_document());
++            assert_eq!(recovered.document.as_ref().unwrap().path(), path.canonicalize().unwrap());
++            assert_eq!(recovered.diff_path.as_deref(), path.canonicalize().unwrap().to_str());
++            assert_eq!(recovered.tab, super::Tab::AllFiles);
++            assert_eq!(recovered.diff_cursor, 1);
++            assert_eq!(recovered.store.get(0).unwrap().text, "saved");
++            if composing {
++                assert_eq!(recovered.input, "saved draft");
++            }
++            assert!(App::new_document(path.clone(), 1).is_err(), "recovery still holds the lock");
++            recovered.reload().unwrap();
++            drop(recovered);
++            assert!(App::new_document(path, 1).is_ok());
++        }
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn document_original_editor_uses_literal_current_file_line_and_reports_errors() {
++        use std::os::unix::fs::PermissionsExt;
++        let (dir, path) = document_fixture();
++        let mut app = App::new_document(path.clone(), 1).unwrap();
++        app.move_cursor(1).unwrap();
++        let helper = dir.path().join("editor-helper");
++        std::fs::write(&helper, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\n").unwrap();
++        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
++        app.edit_original_with(helper.as_os_str()).unwrap();
++        let args = std::fs::read_to_string(dir.path().join("editor-helper.args")).unwrap();
++        assert_eq!(args, format!("{}\n2\n1\n", path.canonicalize().unwrap().display()));
++        assert_eq!(app.status, "opened original in editor");
++        std::fs::write(&helper, "#!/bin/sh\necho split-unavailable >&2\nexit 7\n").unwrap();
++        assert!(app.edit_original_with(helper.as_os_str()).is_err());
++        assert!(app.status.contains("split-unavailable"));
++        assert!(app.edit_original_with(dir.path().join("missing-helper").as_os_str()).is_err());
++        assert!(app.status.starts_with("edit original failed:"));
++        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# title\nsecond\nthird\n");
++        // A removed old-side row is never mistaken for a live line or a rename source.
++        let mut repo_app = App::blocked(dir.path().to_path_buf(), Scope::Uncommitted, None);
++        repo_app.diff_path = Some(path.to_str().unwrap().to_owned());
++        repo_app.visible =
++            vec![crate::diff::Row::Deletion { old_no: 2, spans: Vec::new(), emphasis: Vec::new() }];
++        assert!(repo_app.original_edit_target().is_err());
++    }
++
+     #[test]
+     fn blocked_app_rejects_normal_repository_work_without_panicking() {
+         let mut app = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+diff --git a/src/config.rs b/src/config.rs
+index 39baa9a..e4ceefc 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -12,6 +12,10 @@ use std::time::Duration;
+ #[derive(Clone, Debug)]
+ pub struct Config {
+     pub repo: PathBuf,
++    /// The canonical regular file selected explicitly by `--file` (never a repo fallback).
++    pub document: Option<PathBuf>,
++    /// One-based initial source line; defaults to 1.
++    pub document_line: u32,
+     pub poll: Duration,
+     pub base: Option<String>,
+     pub theme: Option<String>,
+@@ -27,8 +31,13 @@ impl Config {
+     ///
+     /// Recognises `--poll <ms>` (min 200, default 2000), `--base <ref>`,
+     /// `--theme <name>`, and `--wrap on|off`; the first non-flag token is the repo path.
+-    pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Self {
++    /// `--file <absolute-path>` opens exactly one regular file, with optional `--line <positive>`.
++    /// Invalid document arguments fail before terminal setup instead of choosing a repository.
++    pub fn parse<I: IntoIterator<Item = String>>(args: I) -> anyhow::Result<Self> {
+         let mut repo: Option<PathBuf> = None;
++        let mut document: Option<PathBuf> = None;
++        let mut document_line = 1;
++        let mut line_given = false;
+         let mut poll_ms: u64 = 2000;
+         let mut base: Option<String> = None;
+         let mut theme: Option<String> = None;
+@@ -36,6 +45,42 @@ impl Config {
+         let mut it = args.into_iter();
+         while let Some(arg) = it.next() {
+             match arg.as_str() {
++                "--file" => {
++                    anyhow::ensure!(document.is_none(), "--file may only be supplied once");
++                    let value = it
++                        .next()
++                        .ok_or_else(|| anyhow::anyhow!("--file requires an absolute file path"))?;
++                    let path = PathBuf::from(value);
++                    anyhow::ensure!(
++                        path.is_absolute(),
++                        "--file requires an absolute file path: {}",
++                        path.display()
++                    );
++                    let canonical = path
++                        .canonicalize()
++                        .map_err(|error| anyhow::anyhow!("--file {}: {error}", path.display()))?;
++                    anyhow::ensure!(
++                        canonical.is_file(),
++                        "--file must name a regular file: {}",
++                        path.display()
++                    );
++                    document = Some(canonical);
++                }
++                "--line" => {
++                    anyhow::ensure!(!line_given, "--line may only be supplied once");
++                    line_given = true;
++                    let value = it
++                        .next()
++                        .ok_or_else(|| anyhow::anyhow!("--line requires a positive line number"))?;
++                    anyhow::ensure!(
++                        !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()),
++                        "--line requires a positive line number: {value}"
++                    );
++                    document_line = value.parse::<u32>().map_err(|_| {
++                        anyhow::anyhow!("--line requires a positive line number: {value}")
++                    })?;
++                    anyhow::ensure!(document_line > 0, "--line requires a positive line number");
++                }
+                 "--poll" => {
+                     if let Some(v) = it.next() {
+                         poll_ms = v.parse().unwrap_or(poll_ms);
+@@ -48,20 +93,27 @@ impl Config {
+                 _ => {}
+             }
+         }
++        anyhow::ensure!(!line_given || document.is_some(), "--line requires --file");
++        anyhow::ensure!(
++            document.is_none() || repo.is_none(),
++            "--file cannot be combined with a repository path"
++        );
+         let repo =
+             repo.or_else(|| std::env::current_dir().ok()).unwrap_or_else(|| PathBuf::from("."));
+-        Self {
++        Ok(Self {
+             repo,
++            document,
++            document_line,
+             poll: Duration::from_millis(poll_ms.max(200)),
+             base,
+             theme,
+             wrap,
+             plugin_config_dir: None,
+-        }
++        })
+     }
+ 
+-    /// Parse from the real process arguments.
+-    pub fn from_env() -> Self {
++    /// Parse from the real process arguments, validating document arguments before terminal setup.
++    pub fn from_env() -> anyhow::Result<Self> {
+         Self::parse(std::env::args().skip(1))
+     }
+ }
+@@ -605,7 +657,7 @@ mod tests {
+     use std::time::Duration;
+ 
+     fn parse(args: &[&str]) -> Config {
+-        Config::parse(args.iter().map(|s| (*s).to_string()))
++        Config::parse(args.iter().map(|s| (*s).to_string())).unwrap()
+     }
+ 
+     #[test]
+@@ -615,6 +667,64 @@ mod tests {
+         assert_eq!(c.base, None);
+     }
+ 
++    #[test]
++    fn document_flags_resolve_exact_file_and_default_line() {
++        let dir = tempfile::tempdir().unwrap();
++        let file = dir.path().join("a document.md");
++        std::fs::write(&file, "one\ntwo\n").unwrap();
++        let file = file.to_str().unwrap();
++        let c = parse(&["--file", file]);
++        assert_eq!(c.document, Some(std::path::PathBuf::from(file).canonicalize().unwrap()));
++        assert_eq!(c.document_line, 1);
++        let c = parse(&["--line", "2", "--file", file]);
++        assert_eq!(c.document_line, 2);
++        assert_eq!(c.document, Some(std::path::PathBuf::from(file).canonicalize().unwrap()));
++    }
++
++    #[test]
++    fn invalid_document_flags_never_fall_back_to_a_repo() {
++        let dir = tempfile::tempdir().unwrap();
++        let file = dir.path().join("doc.md");
++        std::fs::write(&file, "text").unwrap();
++        let file = file.to_str().unwrap();
++        let directory = dir.path().to_str().unwrap();
++        let absent = dir.path().join("missing");
++        let cases = [
++            vec!["--file"],
++            vec!["--file", "relative.md"],
++            vec!["--file", directory],
++            vec!["--file", absent.to_str().unwrap()],
++            vec!["--file", "--line", "2"],
++            vec!["--line", "2"],
++            vec!["--file", file, "--line"],
++            vec!["--file", file, "--line", "0"],
++            vec!["--file", file, "--line", "-1"],
++            vec!["--file", file, "--line", "oops"],
++            vec!["--file", file, "--line", "+1"],
++            vec!["--file", file, "--line", "4294967296"],
++            vec!["--file", file, directory],
++            vec!["--file", file, "--file", file],
++            vec!["--file", file, "--line", "1", "--line", "2"],
++        ];
++        for args in cases {
++            assert!(Config::parse(args.iter().map(|s| (*s).to_string())).is_err(), "{args:?}");
++        }
++    }
++
++    #[test]
++    #[cfg(unix)]
++    fn document_symlink_resolves_to_its_canonical_regular_file() {
++        let dir = tempfile::tempdir().unwrap();
++        let file = dir.path().join("source.md");
++        let link = dir.path().join("alias.md");
++        std::fs::write(&file, "text").unwrap();
++        std::os::unix::fs::symlink(&file, &link).unwrap();
++        assert_eq!(
++            parse(&["--file", link.to_str().unwrap()]).document,
++            Some(file.canonicalize().unwrap())
++        );
++    }
++
+     #[test]
+     fn flags_and_positional_repo() {
+         let c = parse(&["--poll", "500", "--base", "origin/dev", "/tmp/work"]);
+diff --git a/src/document.rs b/src/document.rs
+new file mode 100644
+index 0000000..af7cbf6
+--- /dev/null
++++ b/src/document.rs
+@@ -0,0 +1,581 @@
++//! Single-document comment snapshots, separate from the git review model.
++//!
++//! The approved document-mode contract persists the seven fields in
++//! `specs/review-model.md` beside the canonical original, without modifying it.
++
++use std::fs::{self, File, Metadata, OpenOptions};
++use std::io::{self, Read, Write};
++use std::path::{Path, PathBuf};
++use std::sync::atomic::{AtomicU64, Ordering};
++
++use anyhow::{Context, Result, bail};
++use serde::{Deserialize, Serialize};
++
++use crate::model::{Comment, CommentStore};
++
++const SCHEMA_VERSION: u32 = 1;
++static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
++
++/// A canonical regular original and its single-writer sidecar lease.
++///
++/// The lock file is deliberately never removed: unlinking it could let another
++/// writer lock a different inode while this document still holds the old one.
++/// Closing the file, including process exit, releases the advisory lock.
++#[derive(Debug)]
++pub struct Document {
++    path: PathBuf,
++    sidecar: PathBuf,
++    _lock: File,
++}
++
++/// Only the agreed canonical snapshot fields are accepted or emitted.
++#[derive(Debug, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Snapshot {
++    schema_version: u32,
++    document: PathBuf,
++    comments: Vec<Comment>,
++}
++
++impl Document {
++    /// Resolve the original, acquire a nonblocking writer lock, and restore comments.
++    /// Missing snapshots start empty; invalid existing snapshots are never repaired.
++    pub fn open(path: &Path) -> Result<(Self, CommentStore)> {
++        let path = path.canonicalize().with_context(|| format!("resolve {}", path.display()))?;
++        if !fs::metadata(&path)?.is_file() {
++            bail!("document is not a regular file: {}", path.display());
++        }
++        path.to_str().context("document path is not UTF-8")?;
++        let sidecar = append_suffix(&path, ".reviewr.json");
++        let lock_path = append_suffix(&sidecar, ".lock");
++        let lock = open_lock(&lock_path)?;
++        lock.try_lock().with_context(|| {
++            format!("document already locked or lock unavailable: {}", path.display())
++        })?;
++        let snapshot = read_snapshot(&sidecar, &path)?;
++        let mut comments = CommentStore::new();
++        if let Some(snapshot) = snapshot {
++            for comment in snapshot.comments {
++                comments.add(comment);
++            }
++        }
++        Ok((Self { path, sidecar, _lock: lock }, comments))
++    }
++
++    /// The absolute canonical original, never its sidecar or an alias.
++    pub fn path(&self) -> &Path {
++        &self.path
++    }
++
++    /// Atomically replace the snapshot while retaining the document's writer lock.
++    /// A write or sync failure leaves the previous snapshot untouched.
++    pub fn save(&self, comments: &CommentStore) -> Result<()> {
++        self.save_with(comments, |file, bytes| file.write_all(bytes))
++    }
++
++    /// Publish through a fresh inode; separating the write permits partial-I/O tests.
++    fn save_with(
++        &self,
++        comments: &CommentStore,
++        write: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
++    ) -> Result<()> {
++        // Refuse even an externally replaced invalid snapshot rather than overwriting
++        // it. The advisory lock coordinates other reviewr writers, not arbitrary tools.
++        read_snapshot(&self.sidecar, &self.path)?;
++        let snapshot = Snapshot {
++            schema_version: SCHEMA_VERSION,
++            document: self.path.clone(),
++            comments: comments.iter().cloned().collect(),
++        };
++        validate_snapshot(&snapshot, &self.path)?;
++        let mut bytes = serde_json::to_vec_pretty(&snapshot).context("encode document comments")?;
++        bytes.push(b'\n');
++        let mut temp = PendingSnapshot::create(&self.sidecar)?;
++        let file = temp.file.as_mut().context("comment temporary is closed")?;
++        write(file, &bytes)
++            .with_context(|| format!("write comment snapshot {}", temp.path.display()))?;
++        file.sync_all()
++            .with_context(|| format!("sync comment snapshot {}", temp.path.display()))?;
++        drop(temp.file.take());
++        // Check again after the write: never knowingly rename over a symlink, a
++        // malformed snapshot, or a snapshot belonging to another document.
++        read_snapshot(&self.sidecar, &self.path)?;
++        fs::rename(&temp.path, &self.sidecar)
++            .with_context(|| format!("replace comment snapshot {}", self.sidecar.display()))?;
++        temp.committed = true;
++        Ok(())
++    }
++}
++
++/// Append to the entire filename, including its extension and non-UTF-8 spelling.
++fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
++    let mut name = path.as_os_str().to_os_string();
++    name.push(suffix);
++    PathBuf::from(name)
++}
++
++/// Inspect an entry without following symlinks; only absent or regular is allowed.
++fn regular_entry(path: &Path) -> Result<Option<Metadata>> {
++    match fs::symlink_metadata(path) {
++        Ok(metadata) if metadata.file_type().is_file() => Ok(Some(metadata)),
++        Ok(_) => bail!("refusing non-regular file or symlink: {}", path.display()),
++        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
++        Err(error) => Err(error).with_context(|| format!("inspect {}", path.display())),
++    }
++}
++
++/// Confirm an opened file is still the inspected regular entry before using it.
++fn check_opened_entry(path: &Path, file: &File) -> Result<()> {
++    let entry =
++        regular_entry(path)?.with_context(|| format!("file disappeared: {}", path.display()))?;
++    let opened =
++        file.metadata().with_context(|| format!("inspect open file {}", path.display()))?;
++    if !opened.is_file() {
++        bail!("refusing non-regular open file: {}", path.display());
++    }
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::MetadataExt;
++        if entry.dev() != opened.dev() || entry.ino() != opened.ino() {
++            bail!("file changed while opening: {}", path.display());
++        }
++    }
++    #[cfg(not(unix))]
++    let _ = entry;
++    Ok(())
++}
++
++/// Create private files exclusively; existing lock contents are never truncated.
++fn private_options() -> OpenOptions {
++    let mut options = OpenOptions::new();
++    options.read(true).write(true).create_new(true);
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::OpenOptionsExt;
++        options.mode(0o600);
++    }
++    options
++}
++
++/// Open a persistent lock inode, refusing symlinks and preserving existing bytes.
++fn open_lock(path: &Path) -> Result<File> {
++    regular_entry(path)?;
++    let file = match private_options().open(path) {
++        Ok(file) => file,
++        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
++            regular_entry(path)?;
++            OpenOptions::new()
++                .read(true)
++                .write(true)
++                .open(path)
++                .with_context(|| format!("open document lock {}", path.display()))?
++        }
++        Err(error) => {
++            return Err(error).with_context(|| format!("create document lock {}", path.display()));
++        }
++    };
++    check_opened_entry(path, &file)?;
++    Ok(file)
++}
++
++/// Read and validate a complete snapshot without ever opening it for writing.
++fn read_snapshot(sidecar: &Path, document: &Path) -> Result<Option<Snapshot>> {
++    if regular_entry(sidecar)?.is_none() {
++        return Ok(None);
++    }
++    let mut file = File::open(sidecar)
++        .with_context(|| format!("open comment snapshot {}", sidecar.display()))?;
++    check_opened_entry(sidecar, &file)?;
++    let mut bytes = Vec::new();
++    file.read_to_end(&mut bytes)
++        .with_context(|| format!("read comment snapshot {}", sidecar.display()))?;
++    let snapshot: Snapshot = serde_json::from_slice(&bytes)
++        .with_context(|| format!("invalid comment snapshot {}", sidecar.display()))?;
++    validate_snapshot(&snapshot, document)?;
++    Ok(Some(snapshot))
++}
++
++/// Refuse foreign files or unusable anchors without rebasing or rewriting comments.
++fn validate_snapshot(snapshot: &Snapshot, document: &Path) -> Result<()> {
++    if snapshot.schema_version != SCHEMA_VERSION {
++        bail!("unsupported comment schema version: {}", snapshot.schema_version);
++    }
++    if snapshot.document.as_os_str() != document.as_os_str() {
++        bail!("comment snapshot belongs to another document: {}", snapshot.document.display());
++    }
++    let file = document.to_str().context("document path is not UTF-8")?;
++    for comment in &snapshot.comments {
++        if comment.file != file {
++            bail!("comment belongs to another document: {}", comment.file);
++        }
++        if comment.start == 0 || comment.end < comment.start {
++            bail!("invalid inclusive comment range: {}-{}", comment.start, comment.end);
++        }
++    }
++    Ok(())
++}
++
++/// A same-directory exclusive temporary, removed on every pre-rename failure.
++#[derive(Debug)]
++struct PendingSnapshot {
++    path: PathBuf,
++    file: Option<File>,
++    committed: bool,
++}
++
++impl PendingSnapshot {
++    /// Retry collisions without touching another writer's temporary file.
++    fn create(sidecar: &Path) -> Result<Self> {
++        for _ in 0..128 {
++            let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
++            let path = append_suffix(sidecar, &format!(".tmp.{}.{sequence}", std::process::id()));
++            match private_options().open(&path) {
++                Ok(file) => return Ok(Self { path, file: Some(file), committed: false }),
++                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
++                Err(error) => {
++                    return Err(error)
++                        .with_context(|| format!("create comment temporary {}", path.display()));
++                }
++            }
++        }
++        bail!("could not create a unique comment temporary for {}", sidecar.display())
++    }
++}
++
++impl Drop for PendingSnapshot {
++    fn drop(&mut self) {
++        if !self.committed {
++            // Close before removal for platforms that cannot unlink an open file.
++            drop(self.file.take());
++            let _ = fs::remove_file(&self.path);
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::model::Side;
++
++    /// An ordinary original with deliberate extension and nonempty content.
++    fn original(dir: &Path) -> PathBuf {
++        let path = dir.join("notes 日本語.test.md");
++        fs::write(&path, "original body\n").unwrap();
++        path.canonicalize().unwrap()
++    }
++
++    /// Both anchor types, both sides, and verbatim multiline/Unicode field content.
++    fn comments(path: &Path) -> CommentStore {
++        let file = path.canonicalize().unwrap().to_str().unwrap().to_owned();
++        let mut comments = CommentStore::new();
++        comments.add(Comment {
++            file: file.clone(),
++            side: Side::Old,
++            start: 7,
++            end: 11,
++            lines: "-old\n context\n\tquoted \"text\"\n".into(),
++            text: "  multiline\n\nreview 🦀\0\r\n".into(),
++            diff_anchored: true,
++        });
++        comments.add(Comment {
++            file,
++            side: Side::New,
++            start: 20,
++            end: 20,
++            lines: " plain content\n".into(),
++            text: String::new(),
++            diff_anchored: false,
++        });
++        comments
++    }
++
++    /// Compare all seven fields and insertion order, not just visible text.
++    fn assert_comments(actual: &CommentStore, expected: &CommentStore) {
++        assert_eq!(actual.iter().collect::<Vec<_>>(), expected.iter().collect::<Vec<_>>());
++    }
++
++    #[test]
++    fn roundtrip_all_fields_and_canonical_json_without_touching_original() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = original(dir.path());
++        let original_bytes = fs::read(&path).unwrap();
++        let (document, loaded) = Document::open(&path).unwrap();
++        assert!(loaded.is_empty());
++        assert_eq!(document.path(), path.canonicalize().unwrap());
++        let comments = comments(&path);
++        document.save(&comments).unwrap();
++        let json: serde_json::Value =
++            serde_json::from_slice(&fs::read(&document.sidecar).unwrap()).unwrap();
++        assert_eq!(json.as_object().unwrap().len(), 3);
++        assert_eq!(json["schema_version"], 1);
++        assert_eq!(json["document"], document.path().to_str().unwrap());
++        assert_eq!(json["comments"][0].as_object().unwrap().len(), 7);
++        assert_eq!(json["comments"][0]["side"], "old");
++        assert_eq!(json["comments"][1]["side"], "new");
++        assert_eq!(document.sidecar, append_suffix(&path, ".reviewr.json"));
++        drop(document);
++        let (_document, loaded) = Document::open(&path).unwrap();
++        assert_comments(&loaded, &comments);
++        assert_eq!(fs::read(&path).unwrap(), original_bytes);
++    }
++
++    #[test]
++    fn empty_snapshot_reopens_empty() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = original(dir.path());
++        let (document, comments) = Document::open(&path).unwrap();
++        assert!(!document.sidecar.exists());
++        document.save(&comments).unwrap();
++        drop(document);
++        let (_document, loaded) = Document::open(&path).unwrap();
++        assert!(loaded.is_empty());
++    }
++
++    #[test]
++    fn save_changed_clone_preserves_edits_and_deletions() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = original(dir.path());
++        let (document, _) = Document::open(&path).unwrap();
++        let comments = comments(&path);
++        document.save(&comments).unwrap();
++        let mut changed = comments.clone();
++        assert!(changed.edit(0, "edited\nverbatim  ".into()));
++        assert!(changed.take(1).is_some());
++        assert_eq!(comments.len(), 2);
++        assert_ne!(comments.get(0).unwrap().text, changed.get(0).unwrap().text);
++        document.save(&changed).unwrap();
++        drop(document);
++        let (document, loaded) = Document::open(&path).unwrap();
++        assert_comments(&loaded, &changed);
++        let mut cleared = loaded.clone();
++        cleared.take_all();
++        document.save(&cleared).unwrap();
++        drop(document);
++        let (_document, loaded) = Document::open(&path).unwrap();
++        assert!(loaded.is_empty());
++    }
++
++    #[test]
++    fn partial_write_failure_preserves_old_json_and_cleans_temporary() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = original(dir.path());
++        let (document, _) = Document::open(&path).unwrap();
++        let comments = comments(&path);
++        document.save(&comments).unwrap();
++        let old = fs::read(&document.sidecar).unwrap();
++        let result = document.save_with(&CommentStore::new(), |file, bytes| {
++            file.write_all(&bytes[..bytes.len() / 2])?;
++            Err(io::Error::other("injected partial write failure"))
++        });
++        assert!(format!("{:#}", result.unwrap_err()).contains("injected partial write failure"));
++        assert_eq!(fs::read(&document.sidecar).unwrap(), old);
++        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 3);
++        drop(document);
++        let (_document, loaded) = Document::open(&path).unwrap();
++        assert_comments(&loaded, &comments);
++    }
++
++    #[test]
++    fn malformed_wrong_schema_wrong_document_and_incomplete_comments_are_refused() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = original(dir.path());
++        let sidecar = append_suffix(&path, ".reviewr.json");
++        let valid = serde_json::json!({
++            "schema_version": 1,
++            "document": path.canonicalize().unwrap(),
++            "comments": []
++        });
++        let mut wrong_schema = valid.clone();
++        wrong_schema["schema_version"] = 2.into();
++        let mut wrong_document = valid.clone();
++        wrong_document["document"] = dir.path().join("other.md").to_str().unwrap().into();
++        let mut missing_field = valid.clone();
++        let mut comment = serde_json::to_value(comments(&path).get(0).unwrap()).unwrap();
++        comment.as_object_mut().unwrap().remove("diff_anchored");
++        missing_field["comments"] = serde_json::json!([comment]);
++        let mut unknown_field = valid.clone();
++        unknown_field["history"] = serde_json::json!([]);
++        for bytes in [
++            b"{bad json".to_vec(),
++            serde_json::to_vec(&wrong_schema).unwrap(),
++            serde_json::to_vec(&wrong_document).unwrap(),
++            serde_json::to_vec(&missing_field).unwrap(),
++            serde_json::to_vec(&unknown_field).unwrap(),
++        ] {
++            fs::write(&sidecar, &bytes).unwrap();
++            assert!(Document::open(&path).is_err());
++            assert_eq!(fs::read(&sidecar).unwrap(), bytes);
++        }
++        fs::write(&sidecar, serde_json::to_vec(&valid).unwrap()).unwrap();
++        assert!(Document::open(&path).is_ok(), "failed open must release its lock");
++    }
++
++    #[test]
++    fn foreign_comment_files_and_unusable_ranges_are_refused_on_open_and_save() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = original(dir.path());
++        let (document, _) = Document::open(&path).unwrap();
++        let valid = comments(&path);
++        document.save(&valid).unwrap();
++        let old = fs::read(&document.sidecar).unwrap();
++        let mut foreign = valid.get(0).unwrap().clone();
++        foreign.file = "relative.md".into();
++        let mut zero_start = valid.get(0).unwrap().clone();
++        zero_start.start = 0;
++        let mut reversed = valid.get(0).unwrap().clone();
++        reversed.end = reversed.start - 1;
++        let invalid_comments = [foreign, zero_start, reversed];
++        for invalid in &invalid_comments {
++            let mut store = CommentStore::new();
++            store.add(invalid.clone());
++            assert!(document.save(&store).is_err());
++            assert_eq!(fs::read(&document.sidecar).unwrap(), old);
++        }
++        let sidecar = document.sidecar.clone();
++        drop(document);
++        for invalid in invalid_comments {
++            let snapshot = Snapshot {
++                schema_version: SCHEMA_VERSION,
++                document: path.clone(),
++                comments: vec![invalid],
++            };
++            let bytes = serde_json::to_vec(&snapshot).unwrap();
++            fs::write(&sidecar, &bytes).unwrap();
++            assert!(Document::open(&path).is_err());
++            assert_eq!(fs::read(&sidecar).unwrap(), bytes);
++        }
++        fs::write(&sidecar, &old).unwrap();
++        let (_document, loaded) = Document::open(&path).unwrap();
++        assert_comments(&loaded, &valid);
++    }
++
++    #[test]
++    fn noncanonical_document_spelling_is_refused() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = original(dir.path());
++        let sidecar = append_suffix(&path, ".reviewr.json");
++        let aliased = format!(
++            "{}/./{}",
++            path.parent().unwrap().display(),
++            path.file_name().unwrap().to_str().unwrap()
++        );
++        // Path equality alone normalizes dot components, but the snapshot contract
++        // requires exactly the canonical spelling, not an equivalent alias.
++        assert_eq!(Path::new(&aliased), path);
++        let bytes = serde_json::to_vec(&serde_json::json!({
++            "schema_version": 1, "document": aliased, "comments": []
++        }))
++        .unwrap();
++        fs::write(&sidecar, &bytes).unwrap();
++        assert!(Document::open(&path).is_err());
++        assert_eq!(fs::read(&sidecar).unwrap(), bytes);
++    }
++
++    #[test]
++    fn save_refuses_externally_replaced_invalid_snapshot() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = original(dir.path());
++        let (document, _) = Document::open(&path).unwrap();
++        document.save(&comments(&path)).unwrap();
++        fs::write(&document.sidecar, b"malformed external edit").unwrap();
++        assert!(document.save(&CommentStore::new()).is_err());
++        assert_eq!(fs::read(&document.sidecar).unwrap(), b"malformed external edit");
++        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 3);
++    }
++
++    #[test]
++    fn lock_refuses_second_writer_then_reopens_after_drop() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = original(dir.path());
++        let (document, _) = Document::open(&path).unwrap();
++        let lock = append_suffix(&document.sidecar, ".lock");
++        fs::write(&lock, b"keep lock contents").unwrap();
++        assert!(Document::open(&path).is_err());
++        assert_eq!(fs::read(&lock).unwrap(), b"keep lock contents");
++        drop(document);
++        let (_document, _) = Document::open(&path).unwrap();
++        assert_eq!(fs::read(&lock).unwrap(), b"keep lock contents");
++    }
++
++    #[test]
++    fn absent_original_and_directory_are_refused() {
++        let dir = tempfile::tempdir().unwrap();
++        assert!(Document::open(&dir.path().join("absent.md")).is_err());
++        assert!(Document::open(dir.path()).is_err());
++        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn original_symlink_uses_canonical_sidecar_and_same_lock() {
++        use std::os::unix::fs::symlink;
++        let dir = tempfile::tempdir().unwrap();
++        let path = original(dir.path());
++        let alias = dir.path().join("alias.md");
++        symlink(&path, &alias).unwrap();
++        let (document, _) = Document::open(&alias).unwrap();
++        assert_eq!(document.path(), path.canonicalize().unwrap());
++        assert!(Document::open(&path).is_err());
++        document.save(&comments(&path)).unwrap();
++        assert!(!append_suffix(&alias, ".reviewr.json").exists());
++        drop(document);
++        let (_document, loaded) = Document::open(&path).unwrap();
++        assert_comments(&loaded, &comments(&path));
++        assert!(fs::symlink_metadata(&alias).unwrap().file_type().is_symlink());
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn sidecar_and_lock_symlinks_are_never_overwritten() {
++        use std::os::unix::fs::symlink;
++        let dir = tempfile::tempdir().unwrap();
++        let path = original(dir.path());
++        let sidecar = append_suffix(&path, ".reviewr.json");
++        let lock = append_suffix(&sidecar, ".lock");
++        let target = dir.path().join("untouched");
++        fs::write(&target, b"do not overwrite").unwrap();
++        symlink(&target, &sidecar).unwrap();
++        assert!(Document::open(&path).is_err());
++        assert!(fs::symlink_metadata(&sidecar).unwrap().file_type().is_symlink());
++        fs::remove_file(&sidecar).unwrap();
++        fs::remove_file(&lock).unwrap();
++        symlink(&target, &lock).unwrap();
++        assert!(Document::open(&path).is_err());
++        assert!(fs::symlink_metadata(&lock).unwrap().file_type().is_symlink());
++        fs::remove_file(&lock).unwrap();
++        let (document, _) = Document::open(&path).unwrap();
++        symlink(&target, &sidecar).unwrap();
++        assert!(document.save(&comments(&path)).is_err());
++        assert!(fs::symlink_metadata(&sidecar).unwrap().file_type().is_symlink());
++        assert_eq!(fs::read(&target).unwrap(), b"do not overwrite");
++        fs::remove_file(&sidecar).unwrap();
++        symlink(dir.path().join("missing-target"), &sidecar).unwrap();
++        assert!(document.save(&comments(&path)).is_err(), "dangling symlinks must also be refused");
++        assert!(!dir.path().join("missing-target").exists());
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn non_utf8_original_is_refused_without_creating_sidecars() {
++        use std::os::unix::ffi::OsStringExt;
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join(std::ffi::OsString::from_vec(b"invalid-\xff.md".to_vec()));
++        fs::write(&path, b"original").unwrap();
++        assert!(Document::open(&path).is_err());
++        assert_eq!(fs::read(&path).unwrap(), b"original");
++        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn private_snapshot_and_lock_permissions() {
++        use std::os::unix::fs::PermissionsExt;
++        let dir = tempfile::tempdir().unwrap();
++        let path = original(dir.path());
++        let (document, _) = Document::open(&path).unwrap();
++        document.save(&comments(&path)).unwrap();
++        for private in [&document.sidecar, &append_suffix(&document.sidecar, ".lock")] {
++            assert_eq!(fs::metadata(private).unwrap().permissions().mode() & 0o777, 0o600);
++        }
++    }
++}
+diff --git a/src/keymap.rs b/src/keymap.rs
+index 53f9c6c..0523984 100644
+--- a/src/keymap.rs
++++ b/src/keymap.rs
+@@ -29,6 +29,8 @@ pub enum Action {
+     Select,
+     Comment,
+     Edit,
++    /// Hand the original document to Explorr; distinct from editing a review comment.
++    EditOriginal,
+     Delete,
+     NextComment,
+     PrevComment,
+@@ -85,7 +87,7 @@ impl std::fmt::Display for Key {
+ 
+ /// Every action with its config name and default keys — the single source the default keymap,
+ /// the name lookup, and the config error message are built from.
+-const ACTIONS: [(Action, &str, &[Key]); 34] = [
++const ACTIONS: [(Action, &str, &[Key]); 35] = [
+     (Action::Down, "down", &[Key::plain('j')]),
+     (Action::Up, "up", &[Key::plain('k')]),
+     (Action::NextHunk, "next-hunk", &[Key::plain(']')]),
+@@ -108,6 +110,7 @@ const ACTIONS: [(Action, &str, &[Key]); 34] = [
+     (Action::Select, "select", &[Key::plain('v')]),
+     (Action::Comment, "comment", &[Key::plain('c')]),
+     (Action::Edit, "edit", &[Key::plain('e')]),
++    (Action::EditOriginal, "edit-original", &[Key::plain('E')]),
+     (Action::Delete, "delete", &[Key::plain('d')]),
+     (Action::NextComment, "next-comment", &[Key::plain('n')]),
+     (Action::PrevComment, "prev-comment", &[Key::plain('N')]),
+@@ -258,6 +261,20 @@ mod tests {
+         assert_eq!(Action::by_config_name("list-narrower"), Some(Action::NavigatorShrink));
+     }
+ 
++    #[test]
++    fn edit_original_is_uppercase_and_distinct_from_comment_edit() {
++        let keymap = Keymap::default();
++        assert_eq!(keymap.action_for(Key::plain('E')), Some(Action::EditOriginal));
++        assert_eq!(keymap.action_for(Key::plain('e')), Some(Action::Edit));
++        assert_eq!(keymap.action_for(Key::ctrl('E')), None);
++        assert_eq!(keymap.hint(Action::EditOriginal), Key::plain('E'));
++        assert_eq!(Action::by_config_name("edit-original"), Some(Action::EditOriginal));
++        let rebound = Keymap::resolve(&[(Action::EditOriginal, vec![Key::plain('x')])]).unwrap();
++        assert_eq!(rebound.action_for(Key::plain('x')), Some(Action::EditOriginal));
++        assert_eq!(rebound.action_for(Key::plain('E')), None);
++        assert_eq!(rebound.action_for(Key::plain('e')), Some(Action::Edit));
++    }
++
+     #[test]
+     fn find_defaults_to_the_ctrl_f_chord() {
+         let keymap = Keymap::default();
+diff --git a/src/lib.rs b/src/lib.rs
+index 134b26a..5641452 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -13,6 +13,7 @@ pub mod azure_devops;
+ pub mod browser;
+ pub mod config;
+ pub mod diff;
++pub mod document;
+ pub mod export;
+ pub mod file_list;
+ pub mod forge;
+@@ -62,7 +63,7 @@ const RESOLVING_NOTE: &str = "resolving plugin config…";
+ 
+ /// Entry point: parse config, set up the terminal, run the loop, restore.
+ pub fn run() -> Result<()> {
+-    let mut cfg = Config::from_env();
++    let mut cfg = Config::from_env()?;
+     log::init();
+     // The config directory resolves once, at startup; every later read rereads only the
+     // file inside it (`specs/config.md`). Only the environment names it here: the CLI
+@@ -70,7 +71,7 @@ pub fn run() -> Result<()> {
+     // a wedged herdr must never hold the paint (issue #4).
+     cfg.plugin_config_dir = config::resolve_config_dir(|| None);
+     let mut initial_config = config::plugin_config(cfg.plugin_config_dir.as_deref());
+-    let mut app = app_for(&cfg, &initial_config);
++    let mut app = app_for(&cfg, &initial_config)?;
+ 
+     let mut terminal = ratatui::init();
+     // Bracketed paste so a multi-line paste arrives as one event, not raw keystrokes whose
+@@ -118,7 +119,23 @@ pub fn run() -> Result<()> {
+     if let Some(dir) = cli_dir {
+         cfg.plugin_config_dir = Some(dir.into());
+         initial_config = config::plugin_config(cfg.plugin_config_dir.as_deref());
+-        app = app_for(&cfg, &initial_config);
++        if cfg.document.is_some() {
++            // The exact-file app already owns its sidecar lock: configure it in place,
++            // rather than trying to open the same document twice during CLI resolution.
++            match &initial_config {
++                Ok(config) => configure_app(&mut app, &cfg, config.clone()),
++                Err(error) => app.set_config_error(error.to_string()),
++            }
++        } else {
++            app = match app_for(&cfg, &initial_config) {
++                Ok(app) => app,
++                Err(error) => {
++                    restore_terminal(kbd);
++                    herdr::clear_pane_label();
++                    return Err(error);
++                }
++            };
++        }
+         if let Err(error) = terminal.draw(|f| ui::render(f, &app)) {
+             restore_terminal(kbd);
+             herdr::clear_pane_label();
+@@ -164,35 +181,84 @@ fn repo_root(cfg: &Config) -> std::path::PathBuf {
+ /// The startup app for one config snapshot: ready on `Ok`, blocked with the error on
+ /// `Err`. Both the env-resolved build and the post-paint CLI-resolved rebuild go through
+ /// here, so the two paths cannot drift.
+-fn app_for(cfg: &Config, initial_config: &Result<PluginConfig, config::PluginConfigError>) -> App {
++fn app_for(
++    cfg: &Config,
++    initial_config: &Result<PluginConfig, config::PluginConfigError>,
++) -> Result<App> {
+     match initial_config {
+         Ok(plugin_config) => ready_app(cfg, plugin_config.clone()),
+         Err(error) => {
+-            let mut app = App::blocked(repo_root(cfg), Scope::Uncommitted, cfg.base.clone());
++            let mut app = if let Some(path) = &cfg.document {
++                App::new_document(path.clone(), cfg.document_line)?
++            } else {
++                App::blocked(repo_root(cfg), Scope::Uncommitted, cfg.base.clone())
++            };
+             app.set_config_error(error.to_string());
+-            app
++            Ok(app)
+         }
+     }
+ }
+ 
+-/// Build a fresh working reviewr pane only after the plugin configuration has validated.
+-fn ready_app(cfg: &Config, plugin_config: PluginConfig) -> App {
+-    let repo = repo_root(cfg);
+-    let scope = plugin_config.default_scope();
+-    logln!(
+-        "start repo={} poll={:?} base={:?} scope={}",
+-        repo.display(),
+-        cfg.poll,
+-        cfg.base,
+-        scope.name()
+-    );
+-    let mut app = App::new(repo, scope, cfg.base.clone());
++/// Build a working pane, propagating exact-file failures rather than falling back to Git.
++fn ready_app(cfg: &Config, plugin_config: PluginConfig) -> Result<App> {
++    let mut app = if let Some(path) = &cfg.document {
++        App::new_document(path.clone(), cfg.document_line)?
++    } else {
++        let repo = repo_root(cfg);
++        let scope = plugin_config.default_scope();
++        logln!(
++            "start repo={} poll={:?} base={:?} scope={}",
++            repo.display(),
++            cfg.poll,
++            cfg.base,
++            scope.name()
++        );
++        App::new(repo, scope, cfg.base.clone())
++    };
++    configure_app(&mut app, cfg, plugin_config);
++    Ok(app)
++}
++
++/// Share validated configuration between startup and lock-preserving recovery shells.
++fn configure_app(app: &mut App, cfg: &Config, plugin_config: PluginConfig) {
+     app.set_plugin_config(plugin_config);
+     app.set_cli_theme(cfg.theme.clone());
+     if let Some(wrap) = cfg.wrap {
+         app.wrap = wrap;
+     }
+-    app
++}
++
++/// Recover configuration without reacquiring the live document's lock; carry its state at landing.
++fn recovery_app(cfg: &Config, plugin_config: PluginConfig) -> Result<App> {
++    if let Some(path) = &cfg.document {
++        let repo = path.parent().unwrap_or_else(|| std::path::Path::new("/")).to_path_buf();
++        let mut app = App::blocked(repo, Scope::Uncommitted, None);
++        configure_app(&mut app, cfg, plugin_config);
++        Ok(app)
++    } else {
++        let mut app = ready_app(cfg, plugin_config)?;
++        if let Err(error) = app.reload() {
++            app.status = format!("load failed: {error}");
++        }
++        Ok(app)
++    }
++}
++
++/// An explicit document never starts repository workers, including while config is blocked.
++fn repository_mode(app: &App, cfg: &Config) -> bool {
++    cfg.document.is_none() && !app.is_document()
++}
++
++/// Timer refreshes read the exact document; repository panes retain the upstream worker cadence.
++fn poll_app(app: &mut App, pr: &mut PrCoordinator) {
++    if app.is_document() {
++        if let Err(error) = app.reload() {
++            app.status = format!("refresh failed: {error}");
++        }
++    } else {
++        schedule_poll_probe(pr, app.tab);
++        app.request_world_refresh(true, false);
++    }
+ }
+ 
+ /// A transient status message (e.g. "sent 3 comments") fades after this long idle.
+@@ -596,6 +662,10 @@ pub fn land_world_completion(
+     completion: crate::world::WorldCompletion,
+     generation: u64,
+ ) -> bool {
++    // Even a misrouted repository completion must not replace an exact-file view.
++    if app.is_document() {
++        return completion.generation == generation;
++    }
+     app.sync_turn_baseline(completion.input.turn_baseline.clone());
+     if let Some(turn) = completion.turn.as_ref() {
+         app.sync_agents_present(turn.agents_present);
+@@ -687,19 +757,21 @@ fn event_loop(
+     // a fresh probe proves its complete input still matches (`specs/forge-host.md`).
+     let (probe_tx, probe_rx) =
+         mpsc::channel::<(u64, Result<crate::forge::PrFetchInput, crate::forge::PrInputError>)>();
+-    let (recovery_tx, recovery_rx) = mpsc::channel::<(u64, PluginConfig, App)>();
++    let (recovery_tx, recovery_rx) = mpsc::channel::<(u64, PluginConfig, Result<App>)>();
+     let mut recovery_inflight = false;
+     let (pr_tx, pr_rx) = mpsc::channel::<TaggedPr>();
+-    let mut pr = PrCoordinator::new(app.plugin_config().is_some());
++    let mut pr = PrCoordinator::new(repository_mode(app, cfg) && app.plugin_config().is_some());
+     // The world worker owns every refresh build and the turn tracker; the loop sends
+     // input-tagged jobs and reconciles the completions (specs/tui.md).
+     let (world_tx, world_job_rx) = mpsc::channel::<crate::world::WorldJob>();
+     let (world_res_tx, world_rx) = mpsc::channel::<crate::world::WorldCompletion>();
+-    let _world_worker = crate::world::spawn(
+-        crate::world::TurnHost::open(app.repo.clone()),
+-        world_job_rx,
+-        world_res_tx,
+-    );
++    let _world_worker = repository_mode(app, cfg).then(|| {
++        crate::world::spawn(
++            crate::world::TurnHost::open(app.repo.clone()),
++            world_job_rx,
++            world_res_tx,
++        )
++    });
+     let mut world_generation = 0_u64;
+     let mut world_inflight: Option<(Instant, bool)> = None;
+     // The search worker spawns on the first overlay open, so a session that never
+@@ -720,15 +792,30 @@ fn event_loop(
+     app.pr_pending = None;
+     let result: Result<()> = (|| {
+         while !app.should_quit {
+-            if let Ok((epoch, target, mut recovered)) = recovery_rx.try_recv() {
++            if let Ok((epoch, target, recovered)) = recovery_rx.try_recv() {
+                 recovery_inflight = false;
+                 if epoch == config_epoch {
+                     match config::plugin_config(cfg.plugin_config_dir.as_deref()) {
+-                        Ok(current) if current == target => {
+-                            recovered.carry_authored_state_from(app);
+-                            *app = recovered;
+-                            pr.recover();
+-                        }
++                        Ok(current) if current == target => match recovered {
++                            Ok(mut recovered) => {
++                                recovered.carry_authored_state_from(app);
++                                if recovered.is_document()
++                                    && let Err(error) = recovered.reload()
++                                {
++                                    recovered.status = format!("load failed: {error}");
++                                }
++                                *app = recovered;
++                                if repository_mode(app, cfg) {
++                                    pr.recover();
++                                } else {
++                                    pr.stop();
++                                }
++                            }
++                            Err(error) => {
++                                app.set_config_error(format!("load failed: {error}"));
++                                pr.stop();
++                            }
++                        },
+                         Ok(_) => {}
+                         Err(error) => {
+                             let message = error.to_string();
+@@ -900,7 +987,10 @@ fn event_loop(
+ 
+             // Dispatch the queued refresh after the frame above painted, so a switch stays
+             // instant and the fresh state lands behind it (specs/tui.md).
+-            if app.world_request.is_some() && app.config_error().is_none() {
++            if repository_mode(app, cfg)
++                && app.world_request.is_some()
++                && app.config_error().is_none()
++            {
+                 let request = app.world_request.take().expect("checked above");
+                 world_generation = world_generation.wrapping_add(1);
+                 let job = crate::world::WorldJob {
+@@ -927,10 +1017,12 @@ fn event_loop(
+             // before it can paint, while the generation still coalesces repeated triggers into
+             // one fresh fetch. Ambient triggers ride in-flight work and arm a trailing fetch
+             // (`request_refresh`).
+-            let fallback_poll = app.tab == crate::app::Tab::Pr && last_pr_poll.elapsed() >= PR_POLL;
++            let fallback_poll = repository_mode(app, cfg)
++                && app.tab == crate::app::Tab::Pr
++                && last_pr_poll.elapsed() >= PR_POLL;
+             let refresh =
+                 app.pr_pending.take().or(fallback_poll.then_some(crate::app::RefreshKind::Ambient));
+-            if let Some(kind) = refresh {
++            if let Some(kind) = refresh.filter(|_| repository_mode(app, cfg)) {
+                 last_pr_poll = Instant::now();
+                 pr.request_refresh(kind);
+             }
+@@ -987,7 +1079,7 @@ fn event_loop(
+                 }
+             }
+ 
+-            if pr.can_start_probe(app.plugin_config().is_some()) {
++            if repository_mode(app, cfg) && pr.can_start_probe(app.plugin_config().is_some()) {
+                 pr.probe_pending = false;
+                 let (tx, repo, base, plugin_config, epoch) = (
+                     probe_tx.clone(),
+@@ -1008,7 +1100,8 @@ fn event_loop(
+                 });
+             }
+ 
+-            if pr.active_fetch.is_none()
++            if repository_mode(app, cfg)
++                && pr.active_fetch.is_none()
+                 && pr.active_probe_epoch.is_none()
+                 && !pr.probe_pending
+                 && let Some((generation, input)) = pr.refresh.take_fetch()
+@@ -1141,12 +1234,7 @@ fn event_loop(
+                     last_poll = Instant::now();
+                     continue;
+                 }
+-                schedule_poll_probe(&mut pr, app.tab);
+-                // The tick's refresh runs on the worker. The same request samples the agents
+-                // in the worktree there, so a turn promoted by the sample is visible to the
+-                // same request's changed-files build (specs/herdr-host.md). A turn end sets
+-                // the PR refetch when the completion lands.
+-                app.request_world_refresh(true, false);
++                poll_app(app, &mut pr);
+                 logln!(
+                     "poll files={} composing={} diff_cursor={} scroll={}",
+                     app.entries.len(),
+@@ -1196,6 +1284,10 @@ fn apply_pr_probe_result(
+     result: Result<crate::forge::PrFetchInput, crate::forge::PrInputError>,
+     config_epoch: u64,
+ ) -> bool {
++    if app.is_document() {
++        pr.stop();
++        return false;
++    }
+     match result {
+         Err(error) => {
+             pr.refresh.probe_failed(pr.probe_pending);
+@@ -1255,7 +1347,7 @@ fn reconcile_plugin_config(
+     app: &mut App,
+     cfg: &Config,
+     config_epoch: &mut u64,
+-    recovery_tx: &mpsc::Sender<(u64, PluginConfig, App)>,
++    recovery_tx: &mpsc::Sender<(u64, PluginConfig, Result<App>)>,
+     recovery_inflight: &mut bool,
+     pr: &mut PrCoordinator,
+ ) -> ConfigGate {
+@@ -1270,7 +1362,7 @@ fn reconcile_plugin_config(
+     };
+ 
+     let pr_changed = previous.forge_hosts() != current.forge_hosts();
+-    if pr_changed {
++    if pr_changed && repository_mode(app, cfg) {
+         pr.config_changed(app.tab == crate::app::Tab::Pr);
+     }
+     if previous.theme() != current.theme() {
+@@ -1290,7 +1382,7 @@ fn observe_plugin_config(
+     app: &mut App,
+     cfg: &Config,
+     epoch: &mut u64,
+-    recovery_tx: &mpsc::Sender<(u64, PluginConfig, App)>,
++    recovery_tx: &mpsc::Sender<(u64, PluginConfig, Result<App>)>,
+     recovery_inflight: &mut bool,
+ ) -> bool {
+     apply_plugin_config_observation(
+@@ -1307,7 +1399,7 @@ fn apply_plugin_config_observation(
+     app: &mut App,
+     cfg: &Config,
+     epoch: &mut u64,
+-    recovery_tx: &mpsc::Sender<(u64, PluginConfig, App)>,
++    recovery_tx: &mpsc::Sender<(u64, PluginConfig, Result<App>)>,
+     recovery_inflight: &mut bool,
+     observed: Result<PluginConfig, config::PluginConfigError>,
+ ) -> bool {
+@@ -1322,10 +1414,7 @@ fn apply_plugin_config_observation(
+                     let (tx, cfg, target, recovery_epoch) =
+                         (recovery_tx.clone(), cfg.clone(), next, *epoch);
+                     thread::spawn(move || {
+-                        let mut recovered = ready_app(&cfg, target.clone());
+-                        if let Err(error) = recovered.reload() {
+-                            recovered.status = format!("load failed: {error}");
+-                        }
++                        let recovered = recovery_app(&cfg, target.clone());
+                         let _ = tx.send((recovery_epoch, target, recovered));
+                     });
+                 }
+@@ -1596,6 +1685,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) ->
+             K::BasePick => app.open_base_picker(),
+             K::Select => app.toggle_select(),
+             K::Comment => app.start_comment(),
++            K::EditOriginal => app.edit_original()?,
+             // `edit`/`delete` act on the comment under the diff cursor, so they only fire with
+             // the diff focused — otherwise `delete` would silently drop a comment under an
+             // off-screen cursor. (The comments-list overlay targets the highlighted row instead.)
+@@ -1740,6 +1830,12 @@ pub fn handle_mouse(
+         }
+         return Ok(());
+     }
++    if m.kind == MouseEventKind::Down(MouseButton::Left)
++        && ui::hit_edit_original(area, app, m.column, m.row)
++    {
++        app.edit_original()?;
++        return Ok(());
++    }
+     // A mouse gesture is one of the "any other input" that drops an armed crossing: the reviewer
+     // who reaches for the mouse has left the file's edge behind (`specs/input.md`). Pointer motion
+     // is not a gesture — capture reports every move over the pane, and a pointer resting on
+@@ -1881,6 +1977,189 @@ mod refresh_tests {
+     };
+     use crate::app::{App, Tab};
+ 
++    /// A document fixture in a non-Git directory; all originals and sidecars stay temporary.
++    fn document_app(line: u32) -> (tempfile::TempDir, Config, App) {
++        let dir = tempfile::tempdir().unwrap();
++        let file = dir.path().join("exact document.md");
++        std::fs::write(&file, "# First\nsecond\nthird\n").unwrap();
++        let cfg = Config::parse([
++            "--file".to_string(),
++            file.display().to_string(),
++            "--line".to_string(),
++            line.to_string(),
++        ])
++        .unwrap();
++        let app = ready_app(&cfg, crate::config::PluginConfig::default()).unwrap();
++        (dir, cfg, app)
++    }
++
++    #[test]
++    fn document_startup_is_source_at_exact_line_without_repository_workers() {
++        let (_dir, cfg, app) = document_app(2);
++        assert!(app.is_document());
++        assert!(!super::repository_mode(&app, &cfg));
++        assert_eq!(app.tab, Tab::AllFiles);
++        assert_eq!(app.focus, crate::app::Focus::Diff);
++        assert_eq!(app.diff_path.as_deref(), cfg.document.as_ref().unwrap().to_str());
++        assert_eq!(app.visible[app.diff_cursor].new_no(), Some(2));
++        assert!(!app.preview_active());
++        assert_eq!(app.entries.len(), 1);
++        assert!(app.world_request.is_none());
++    }
++
++    #[test]
++    fn document_periodic_poll_reads_exact_file_and_never_queues_git_work() {
++        let (_dir, cfg, mut app) = document_app(2);
++        let file = cfg.document.as_ref().unwrap();
++        // Simulate an external editor update, not a reviewr write to the original.
++        std::fs::write(file, "# First\nupdated second\nthird\n").unwrap();
++        let mut pr = PrCoordinator::new(false);
++        super::poll_app(&mut app, &mut pr);
++        assert!(app.visible.iter().any(|row| row.text() == "updated second"));
++        assert_eq!(app.diff_path.as_deref(), file.to_str());
++        assert_eq!(app.visible[app.diff_cursor].new_no(), Some(2));
++        assert_eq!(app.entries.len(), 1);
++        assert!(app.world_request.is_none());
++        assert!(app.pr_pending.is_none());
++        assert!(!pr.probe_pending);
++        assert!(pr.refresh.take_fetch().is_none());
++    }
++
++    #[test]
++    fn document_ignores_misrouted_world_and_forge_completions() {
++        let (_dir, cfg, mut app) = document_app(2);
++        let mut input = app.world_input();
++        input.turn_baseline = Some("foreign baseline".into());
++        let completion = crate::world::WorldCompletion {
++            generation: 7,
++            input,
++            reveal: true,
++            turn: Some(crate::world::TurnReport { ended: true, agents_present: Some(false) }),
++            snapshot: Some(Ok(crate::world::WorldSnapshot {
++                changed: Default::default(),
++                entries: vec![],
++                branch_base: Default::default(),
++            })),
++        };
++        assert!(super::land_world_completion(&mut app, completion, 7));
++        assert_eq!(app.entries.len(), 1);
++        assert_eq!(app.diff_path.as_deref(), cfg.document.as_ref().unwrap().to_str());
++        assert_eq!(app.visible[app.diff_cursor].new_no(), Some(2));
++        assert!(app.world_input().turn_baseline.is_none());
++        assert!(app.pr_pending.is_none());
++        let mut pr = PrCoordinator::new(true);
++        assert!(!apply_pr_probe_result(
++            &mut app,
++            &mut pr,
++            Ok(input_with("github.com", "repo", "wrong", "head")),
++            0
++        ));
++        assert!(!pr.probe_pending);
++        assert_eq!(app.entries.len(), 1);
++    }
++
++    #[test]
++    fn document_startup_errors_are_not_empty_ready_apps() {
++        let (_dir, cfg, app) = document_app(1);
++        // A second launch cannot quietly discard a conflicting lock and choose the repo.
++        assert!(ready_app(&cfg, crate::config::PluginConfig::default()).is_err());
++        drop(app);
++        let file = cfg.document.as_ref().unwrap();
++        let sidecar = format!("{}.reviewr.json", file.display());
++        std::fs::write(sidecar, "not JSON").unwrap();
++        assert!(super::app_for(&cfg, &Ok(crate::config::PluginConfig::default())).is_err());
++        assert_eq!(std::fs::read_to_string(file).unwrap(), "# First\nsecond\nthird\n");
++    }
++
++    #[test]
++    fn document_config_recovery_transfers_lock_source_and_comments_without_reopening() {
++        let (_dir, cfg, mut app) = document_app(2);
++        app.start_comment();
++        app.input_paste("review note");
++        app.submit_comment();
++        let original = std::fs::read(cfg.document.as_ref().unwrap()).unwrap();
++        app.set_config_error("config blocked".into());
++        let mut recovered =
++            super::recovery_app(&cfg, crate::config::PluginConfig::default()).unwrap();
++        assert!(!recovered.is_document(), "recovery shell does not acquire a second lock");
++        assert!(
++            !super::repository_mode(&recovered, &cfg),
++            "blocked shell still cannot start Git work"
++        );
++        recovered.carry_authored_state_from(&mut app);
++        recovered.reload().unwrap();
++        assert!(recovered.is_document());
++        assert!(!app.is_document());
++        assert_eq!(recovered.tab, Tab::AllFiles);
++        assert_eq!(recovered.diff_path.as_deref(), cfg.document.as_ref().unwrap().to_str());
++        assert_eq!(recovered.store.len(), 1);
++        assert_eq!(recovered.visible[recovered.diff_cursor].new_no(), Some(2));
++        assert!(
++            ready_app(&cfg, crate::config::PluginConfig::default()).is_err(),
++            "transferred lock remains held"
++        );
++        assert_eq!(std::fs::read(cfg.document.as_ref().unwrap()).unwrap(), original);
++    }
++
++    #[test]
++    fn document_e_edits_comment_and_uppercase_e_routes_to_original_helper() {
++        let (_dir, cfg, mut app) = document_app(2);
++        let area = ratatui::layout::Rect::new(0, 0, 100, 25);
++        let keymap = crate::keymap::Keymap::default();
++        app.start_comment();
++        app.input_paste("review note");
++        app.submit_comment();
++        super::handle_key(&mut app, KeyEvent::from(KeyCode::Char('e')), area, &keymap).unwrap();
++        assert!(matches!(app.mode, crate::app::Mode::Composing { editing: Some(0) }));
++        app.cancel_comment();
++        // Make the original unavailable so routing can be proved without executing an editor.
++        std::fs::remove_file(cfg.document.as_ref().unwrap()).unwrap();
++        let error = super::handle_key(
++            &mut app,
++            KeyEvent::new(KeyCode::Char('E'), KeyModifiers::SHIFT),
++            area,
++            &keymap,
++        )
++        .unwrap_err();
++        assert!(format!("{error:#}").contains("locating original file"));
++        assert!(app.status.starts_with("edit original failed:"));
++        assert_eq!(app.mode, crate::app::Mode::Normal);
++        assert_eq!(app.store.len(), 1);
++    }
++
++    #[test]
++    fn visible_document_footer_click_routes_to_original_helper() {
++        let (_dir, cfg, mut app) = document_app(2);
++        let area = ratatui::layout::Rect::new(0, 0, 100, 25);
++        let backend = ratatui::backend::TestBackend::new(area.width, area.height);
++        let mut terminal = ratatui::Terminal::new(backend).unwrap();
++        terminal.draw(|frame| crate::ui::render(frame, &app)).unwrap();
++        let footer = (0..area.width)
++            .map(|x| terminal.backend().buffer()[(x, area.height - 1)].symbol())
++            .collect::<String>();
++        assert!(footer.contains("E Edit original"), "{footer}");
++        let col = (0..area.width)
++            .find(|&x| crate::ui::hit_edit_original(area, &app, x, area.height - 1))
++            .unwrap();
++        let heights = crate::ui::diff_row_heights(&app, area);
++        std::fs::remove_file(cfg.document.as_ref().unwrap()).unwrap();
++        let error = super::handle_mouse(
++            &mut app,
++            MouseEvent {
++                kind: MouseEventKind::Down(MouseButton::Left),
++                column: col,
++                row: area.height - 1,
++                modifiers: KeyModifiers::NONE,
++            },
++            area,
++            &heights,
++            &crate::keymap::Keymap::default(),
++        )
++        .unwrap_err();
++        assert!(format!("{error:#}").contains("locating original file"));
++        assert!(app.status.starts_with("edit original failed:"));
++    }
++
+     #[test]
+     fn the_indicator_lights_only_for_a_building_job_past_the_delay() {
+         use std::time::Duration;
+@@ -2068,7 +2347,7 @@ mod refresh_tests {
+         let config_dir = tempfile::tempdir().unwrap();
+         let path = config_dir.path().join("config.toml");
+         std::fs::write(&path, "navigator_position = \"right\"\n").unwrap();
+-        let cfg = Config::parse([repo.path().display().to_string()]);
++        let cfg = Config::parse([repo.path().display().to_string()]).unwrap();
+         let mut app = App::new(repo.path().to_path_buf(), Scope::Uncommitted, None);
+         app.set_plugin_config(plugin_config_in(config_dir.path()).unwrap());
+         let painted = PaintedFrameSnapshot::capture(&app);
+@@ -2582,7 +2861,7 @@ mod refresh_tests {
+         let repo = tempfile::tempdir().unwrap();
+         let config_dir = tempfile::tempdir().unwrap();
+         std::fs::write(config_dir.path().join("config.toml"), "auto_open = false\n").unwrap();
+-        let cfg = Config::parse([repo.path().display().to_string()]);
++        let cfg = Config::parse([repo.path().display().to_string()]).unwrap();
+         let mut app = App::new(repo.path().to_path_buf(), Scope::Uncommitted, None);
+         let (tx, _rx) = mpsc::channel();
+         let mut epoch = 0;
+@@ -2621,8 +2900,8 @@ mod refresh_tests {
+         let config_dir = tempfile::tempdir().unwrap();
+         let path = config_dir.path().join("config.toml");
+         std::fs::write(&path, "default_scope = \"branch\"\n").unwrap();
+-        let cfg = Config::parse([repo.path().display().to_string()]);
+-        let mut app = ready_app(&cfg, plugin_config_in(config_dir.path()).unwrap());
++        let cfg = Config::parse([repo.path().display().to_string()]).unwrap();
++        let mut app = ready_app(&cfg, plugin_config_in(config_dir.path()).unwrap()).unwrap();
+         assert_eq!(app.scope, Scope::Branch, "startup seeds the configured scope");
+ 
+         // The user switches in-session; a reread with a different default must not move it.
+@@ -2649,7 +2928,7 @@ mod refresh_tests {
+         let config_dir = tempfile::tempdir().unwrap();
+         let path = config_dir.path().join("config.toml");
+         std::fs::write(&path, "unknown = true\n").unwrap();
+-        let cfg = Config::parse([repo.path().display().to_string()]);
++        let cfg = Config::parse([repo.path().display().to_string()]).unwrap();
+         let mut app = App::new(repo.path().to_path_buf(), Scope::Uncommitted, None);
+         let (tx, rx) = mpsc::channel();
+         let mut epoch = 0;
+@@ -2679,6 +2958,6 @@ mod refresh_tests {
+             rx.recv_timeout(Duration::from_secs(5)).expect("recovery worker");
+         assert_eq!(recovery_epoch, epoch);
+         assert_eq!(target.theme(), "gruvbox");
+-        assert_eq!(recovered.plugin_config().unwrap().theme(), "gruvbox");
++        assert_eq!(recovered.unwrap().plugin_config().unwrap().theme(), "gruvbox");
+     }
+ }
+diff --git a/src/model.rs b/src/model.rs
+index 275563d..6066f65 100644
+--- a/src/model.rs
++++ b/src/model.rs
+@@ -1,7 +1,9 @@
+ //! In-memory review model: scopes, changed files, and comments.
+ //!
+-//! See `specs/review-model.md`. Comments live only for the session and are
+-//! removed by export or delete — never by a refresh.
++//! See `specs/review-model.md`. Comments are removed by export or delete — never
++//! by a refresh. Document mode can persist this same model through its sidecar.
++
++use serde::{Deserialize, Serialize};
+ 
+ /// Which set of changes the Changes view shows.
+ #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+@@ -76,14 +78,16 @@ pub struct ChangedFile {
+ }
+ 
+ /// Which side of the diff a comment's lines live on.
+-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
++#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
++#[serde(rename_all = "lowercase")]
+ pub enum Side {
+     New,
+     Old,
+ }
+ 
+ /// A reviewer comment anchored to a run of diff lines, carrying the snippet.
+-#[derive(Clone, PartialEq, Eq, Debug)]
++#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
+ pub struct Comment {
+     pub file: String,
+     pub side: Side,
+@@ -113,7 +117,7 @@ impl Comment {
+ }
+ 
+ /// The in-memory comment list for one worktree review session.
+-#[derive(Default, Debug)]
++#[derive(Clone, Default, Debug)]
+ pub struct CommentStore {
+     items: Vec<Comment>,
+ }
+diff --git a/src/ui.rs b/src/ui.rs
+index c6b4d90..101c542 100644
+--- a/src/ui.rs
++++ b/src/ui.rs
+@@ -454,7 +454,7 @@ pub enum HeaderHit {
+ /// shift the spans under the pointer (`specs/config.md`: one snapshot per frame).
+ #[must_use]
+ pub fn hit_header(area: Rect, app: &App, keymap: &Keymap, col: u16, row: u16) -> Option<HeaderHit> {
+-    if row != area.y {
++    if app.is_document() || row != area.y {
+         return None;
+     }
+     let spans = tab_spans(keymap);
+@@ -612,6 +612,16 @@ fn tab_bar_spans(app: &App) -> Vec<Span<'static>> {
+ }
+ 
+ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
++    if app.is_document() {
++        let p = app.palette();
++        let view = if app.preview_active() { "preview" } else { "source" };
++        let label = format!(" Document · {view}  {}", indicator_glyph(app));
++        frame.render_widget(
++            Paragraph::new(label).style(Style::default().bg(p.surface0).fg(p.lavender)),
++            area,
++        );
++        return;
++    }
+     let chip = scope_chip(app);
+     let base = base_parts(app, app.keymap(), area.width);
+     let base_width = base.as_ref().map_or(0, |(lead, name, tail)| {
+@@ -1485,6 +1495,7 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
+         A::Select => (hint(K::Select), "select"),
+         A::ClearSelection => ("esc".into(), "clear"),
+         A::EditComment => (hint(K::Edit), "edit"),
++        A::EditOriginal => (hint(K::EditOriginal), "Edit original"),
+         A::DeleteComment => (hint(K::Delete), "delete"),
+         A::JumpComment => (format!("{}/{}", hint(K::NextComment), hint(K::PrevComment)), "jump"),
+         A::ExpandFold => ("→".into(), "expand fold"),
+@@ -1629,6 +1640,35 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
+     frame.render_widget(Paragraph::new(lines).style(Style::default().bg(p.surface0)), area);
+ }
+ 
++/// Hit only the visible `Edit original` entry, using the same clipped footer lines as paint.
++/// Hidden overflow, modal bars, and a truncated-away label never advertise a clickable action.
++#[must_use]
++pub fn hit_edit_original(area: Rect, app: &App, col: u16, row: u16) -> bool {
++    if !app.is_document() || app.mode != Mode::Normal {
++        return false;
++    }
++    let footer = panes(area, app).status;
++    if !contains(footer, col, row) {
++        return false;
++    }
++    let lines = footer_lines(app, footer.width as usize);
++    let Some(line) = lines.get((row - footer.y) as usize) else { return false };
++    let (key, label) = action_key_label(app, FooterAction::EditOriginal);
++    let label = format!(" {label}");
++    let mut x = footer.x as usize;
++    for (index, span) in line.spans.iter().enumerate() {
++        if span.content == key
++            && line.spans.get(index + 1).is_some_and(|next| next.content == label)
++        {
++            let end = x + span.width() + label.width();
++            // Only claim the whole entry if it painted, not clipped text at the right edge.
++            return end <= (footer.x + footer.width) as usize && (x..end).contains(&(col as usize));
++        }
++        x += span.width();
++    }
++    false
++}
++
+ /// The footer's height for the vertical layout: one row collapsed, one plus the wrapped bands when
+ /// the `?` expansion is open, capped so the body keeps its `Min(3)` (`specs/input.md`, `tui.md`).
+ fn footer_height(app: &App, area: Rect) -> u16 {
+@@ -3334,6 +3374,98 @@ fn contains(rect: Rect, col: u16, row: u16) -> bool {
+         && row < rect.y.saturating_add(rect.height)
+ }
+ 
++#[cfg(test)]
++mod document_tests {
++    use super::*;
++    use crate::keymap::{Action, Key};
++
++    /// Build a temporary document and capture the real footer, not an invented hit rectangle.
++    fn document() -> (tempfile::TempDir, App) {
++        let dir = tempfile::tempdir().unwrap();
++        let file = dir.path().join("notes.md");
++        std::fs::write(&file, "# Read me\nA source line\n").unwrap();
++        let app = App::new_document(file, 2).unwrap();
++        (dir, app)
++    }
++
++    /// Render to a simulation backend and return every row as visible terminal text.
++    fn paint(app: &App, width: u16, height: u16) -> Vec<String> {
++        let backend = ratatui::backend::TestBackend::new(width, height);
++        let mut terminal = ratatui::Terminal::new(backend).unwrap();
++        terminal.draw(|frame| render(frame, app)).unwrap();
++        (0..height)
++            .map(|y| (0..width).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect())
++            .collect()
++    }
++
++    #[test]
++    fn document_footer_painted_key_and_label_are_both_clickable() {
++        let (_dir, app) = document();
++        let area = Rect::new(0, 0, 100, 25);
++        let rows = paint(&app, area.width, area.height);
++        let footer = rows.last().unwrap();
++        let byte = footer.find("E Edit original").expect("visible original editor hint");
++        let start = footer[..byte].width();
++        for col in start..start + "E Edit original".len() {
++            assert!(hit_edit_original(area, &app, col as u16, 24), "column {col}");
++        }
++        assert!(!hit_edit_original(area, &app, start.saturating_sub(1) as u16, 24));
++        assert!(!hit_edit_original(area, &app, (start + "E Edit original".len()) as u16, 24));
++        assert!(!hit_edit_original(area, &app, start as u16, 23));
++        assert!(rows[0].contains("Document · source"));
++        assert!(!rows[0].contains("Changes") && !rows[0].contains("PR"));
++        assert_eq!(hit_header(area, &app, app.keymap(), 2, 0), None);
++    }
++
++    #[test]
++    fn expanded_narrow_footer_uses_the_rebound_original_key_and_actual_row() {
++        let (_dir, mut app) = document();
++        let cfg = tempfile::tempdir().unwrap();
++        std::fs::write(cfg.path().join("config.toml"), "[keybindings]\nedit-original = [\"x\"]\n")
++            .unwrap();
++        app.set_plugin_config(crate::config::plugin_config_in(cfg.path()).unwrap());
++        assert_eq!(app.keymap().hint(Action::EditOriginal), Key::plain('x'));
++        app.keys_expanded = true;
++        let area = Rect::new(0, 0, 40, 25);
++        let rows = paint(&app, area.width, area.height);
++        let (row, start) = rows
++            .iter()
++            .enumerate()
++            .find_map(|(y, text)| text.find("x Edit original").map(|x| (y, text[..x].width())))
++            .unwrap();
++        assert!(hit_edit_original(area, &app, start as u16, row as u16));
++        assert!(hit_edit_original(area, &app, (start + 5) as u16, row as u16));
++        assert!(!hit_edit_original(area, &app, start as u16, 0));
++    }
++
++    #[test]
++    fn clipped_or_modal_footer_never_claims_a_hidden_original_action() {
++        let (_dir, mut app) = document();
++        let narrow = Rect::new(0, 0, 12, 20);
++        assert!(!paint(&app, 12, 20).last().unwrap().contains("Edit original"));
++        assert!((0..12).all(|x| !hit_edit_original(narrow, &app, x, 19)));
++        app.start_comment();
++        let area = Rect::new(0, 0, 100, 25);
++        assert!(!paint(&app, 100, 25).last().unwrap().contains("Edit original"));
++        assert!((0..100).all(|x| !hit_edit_original(area, &app, x, 24)));
++    }
++
++    #[test]
++    fn document_preview_remains_optional_with_source_return_and_original_hint() {
++        let (_dir, mut app) = document();
++        assert!(!app.preview_active());
++        app.toggle_preview();
++        assert!(app.preview_active());
++        let rows = paint(&app, 100, 25);
++        assert!(rows[0].contains("Document · preview"));
++        assert!(rows.last().unwrap().contains("m source"));
++        assert!(rows.last().unwrap().contains("E Edit original"));
++        app.toggle_preview();
++        assert!(!app.preview_active());
++        assert_eq!(app.visible[app.diff_cursor].new_no(), Some(2));
++    }
++}
++
+ /// The content area inside a one-cell border.
+ fn inner_rect(outer: Rect) -> Rect {
+     Rect {
