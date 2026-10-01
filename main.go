@@ -253,8 +253,16 @@ var openFileInHerdRSplit = app.OpenFileInHerdRSplit
 // or failing helpers fail closed; ordinary non-Markdown links still use Explorr.
 func openHerdRFile(path string, line, col int, review bool) error {
 	if ext := strings.ToLower(filepath.Ext(path)); review || ext == ".md" || ext == ".markdown" {
-		helper, err := exec.LookPath(reviewMarkdownHelper)
-		if err != nil {
+		// Herdr supplies the plugin root, but does not prepend its bin to PATH.
+		// Prefer the bundled patched helper before the global-install paths.
+		var helper string
+		if root := os.Getenv("HERDR_PLUGIN_ROOT"); root != "" {
+			helper, _ = exec.LookPath(filepath.Join(root, "bin", reviewMarkdownHelper))
+		}
+		if helper == "" {
+			helper, _ = exec.LookPath(reviewMarkdownHelper)
+		}
+		if helper == "" {
 			helper = toolpath.Look(reviewMarkdownHelper)
 		}
 		if helper == "" {

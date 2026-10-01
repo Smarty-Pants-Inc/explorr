@@ -2,8 +2,6 @@
 /bin/
 /dist/
 /herdr/bin/
-/reviewr/bin/
-/reviewr/__pycache__/
 
 # macOS metadata.
 .DS_Store

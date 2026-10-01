@@ -103,8 +103,9 @@ the new pane to interact with it. Installing/building alone opens nothing.
 ## Edit the source, not a comment
 
 In patched document mode, the visible **Edit original** footer action (also
-uppercase `E`) launches `herdr-review-edit-original` with the canonical source
-file, selected current source line, and column `1`. Lowercase `e` still edits a
+uppercase `E`) launches the `herdr-review-edit-original` helper beside the installed
+Reviewr binary with the canonical source file, selected current source line, and column `1`.
+This does not depend on the new pane inheriting the link action's PATH. Lowercase `e` still edits a
 review comment. The source opens as a native, single-file Explorr editor in
 another explicit, unfocused right split. Reviewr remains the read/review pane;
 it does not write the original. Removed historical lines are not valid current
@@ -188,7 +189,7 @@ ln -sfn open-file "$DEST/reviewr/edit-original"
 cp reviewr/bin/herdr-reviewr "$DEST/reviewr/bin/"
 ln -sfn ../open-file "$DEST/reviewr/bin/herdr-review-last-markdown"
 ln -sfn ../edit-original "$DEST/reviewr/bin/herdr-review-edit-original"
-# HerdR already prepends the existing plugin's bin/. Bridge both helpers there.
+# Explorr resolves the review helper from HERDR_PLUGIN_ROOT/bin; bridge it there.
 ln -sfn ../../reviewr/open-file "$DEST/herdr/bin/herdr-review-last-markdown"
 ln -sfn ../../reviewr/edit-original "$DEST/herdr/bin/herdr-review-edit-original"
 ln -sfn ../../reviewr/bin/herdr-reviewr "$DEST/herdr/bin/herdr-reviewr"
@@ -196,16 +197,11 @@ ln -sfn ../../reviewr/bin/herdr-reviewr "$DEST/herdr/bin/herdr-reviewr"
 herdr plugin link "$DEST/herdr"
 ```
 
-The Explorr plugin launch environment should expose **both** bundle directories:
-
-```sh
-PATH="$HERDR_PLUGIN_ROOT/../reviewr/bin:$HERDR_PLUGIN_ROOT/bin:$PATH"
-export PATH
-```
-
-The `herdr/bin/` bridge above also supports a launcher that currently prepends
-only that directory. Preserving the helper symlinks (or copying the helper and
-patched binary as actual siblings) keeps binary resolution deterministic.
+HerdR supplies `HERDR_PLUGIN_ROOT` but does **not** prepend the plugin's `bin/` to
+PATH. Explorr prefers the explicit `herdr/bin/` helper bridge above; Reviewr resolves
+its edit helper beside its own executable. Preserve these symlinks (or copy the
+helper and patched binary as actual siblings) so neither launch needs a fleet-wide
+PATH change.
 Do not link the upstream `persiyanov.reviewr` plugin: its startup hooks are not
 part of this integration. The recipe is documentation; running the build
 script does not run the plugin-link command.
