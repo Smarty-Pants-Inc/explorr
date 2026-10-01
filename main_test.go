@@ -564,8 +564,28 @@ func TestResolveArgs_SingleFileAtCarriesPosition(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := resolveArgs([]string{"--single-file-at", file, "12", "4"})
-	if got.Err != nil || got.Action != actionEdit || got.OpenFile != file || got.OpenLine != 12 || got.OpenCol != 4 {
+	if got.Err != nil || got.Action != actionEdit || got.OpenFile != file || got.OpenLine != 12 || got.OpenCol != 4 || !got.Isolated {
 		t.Fatalf("resolved to %+v", got)
+	}
+}
+
+// TestResolveArgs_IsolationOnlyForDedicatedLinks keeps ordinary filename,
+// project, --open-at and debug invocations on their existing integration path.
+func TestResolveArgs_IsolationOnlyForDedicatedLinks(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "target.txt")
+	if err := os.WriteFile(file, []byte("target"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		nil, {dir}, {file}, {filepath.Join(dir, "new.txt")},
+		{"--open-at", file + ":2:3"}, {"--debug", "start"},
+		{"--explorer", dir},
+	} {
+		got := resolveArgs(args)
+		if got.Err != nil || got.Isolated {
+			t.Errorf("ordinary invocation %q: %+v", args, got)
+		}
 	}
 }
 

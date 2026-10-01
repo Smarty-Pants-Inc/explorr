@@ -408,6 +408,11 @@ type App struct {
 	theme    theme.Theme
 	explorer bool
 
+	// isolated link/edit panes accept local actions, never global panel requests.
+	// Their shared publishers/store stay nil so they cannot overwrite another editor's state.
+	// Root containment and sequence floors cannot attribute a sibling's fresh request.
+	isolated bool
+
 	rootDir   string
 	tree      *filetree.Tree
 	tabs      []*editor.Tab
@@ -694,7 +699,8 @@ type App struct {
 	quit bool
 }
 
-func newScreen(th theme.Theme) (tcell.Screen, error) {
+// newScreen creates the terminal screen; tests substitute a simulation to exercise constructors.
+var newScreen = func(th theme.Theme) (tcell.Screen, error) {
 	scr, err := tcell.NewScreen()
 	if err != nil {
 		return nil, err
@@ -771,6 +777,20 @@ func NewSingleFile(filePath string) (*App, error) {
 
 // NewSingleFileAt opens one file and places the cursor at a 1-based location.
 func NewSingleFileAt(filePath string, line, col int) (*App, error) {
+	return newSingleFileAt(filePath, line, col, false)
+}
+
+// NewIsolatedSingleFileAt opens a dedicated link/edit pane at a 1-based location.
+// It neither accepts shared open/debug requests nor loads/publishes shared editor
+// state; explicit user actions (including navigation and debugging) remain available.
+// Editable files bind their loaded identity; read-only previews need no binding.
+func NewIsolatedSingleFileAt(filePath string, line, col int) (*App, error) {
+	return newSingleFileAt(filePath, line, col, true)
+}
+
+// newSingleFileAt establishes channel ownership before bootstrap or opening a tab.
+// Isolated panes keep breakpoint/debug models local, without shared persistence.
+func newSingleFileAt(filePath string, line, col int, isolated bool) (*App, error) {
 	th := theme.Default()
 	scr, err := newScreen(th)
 	if err != nil {
@@ -783,37 +803,46 @@ func NewSingleFileAt(filePath string, line, col int) (*App, error) {
 	}
 
 	a := &App{
-		screen: scr,
-		theme:  th,
+		screen:   scr,
+		theme:    th,
+		isolated: isolated,
 		// Absolute for the same reason as above; single-file mode has no tree to borrow it from.
 		rootDir:        absOr(rootDir),
-		active:         state.NewPublisher(),
-		bpStore:        state.NewBreakpointStore(),
-		debugPub:       state.NewDebugPublisher(),
 		lastDebugSeq:   debugRequestFloor,
 		tree:           nil,
 		hoveredMenuRow: -1,
 		sidebarShown:   false,
 		sidebarWidth:   defaultSidebarWidth,
 	}
-	a.breakpoints = loadPersistedBreakpoints(a.rootDir)
+	if !isolated {
+		a.active = state.NewPublisher()
+		a.bpStore = state.NewBreakpointStore()
+		a.debugPub = state.NewDebugPublisher()
+		a.breakpoints = loadPersistedBreakpoints(a.rootDir)
+	}
 	a.setActiveFolder(rootDir)
 	a.loadConfig()
 	a.loadCustomActions()
 	// openFile loads the file's git gutter markers itself (a file-scoped
 	// `git diff`), so single-file mode shows change bars on open without
 	// the whole-repo status or tree walk that New performs.
-	a.openFileAt(filePath, line, col)
+	if err := a.openFileAt(filePath, line, col); err != nil {
+		a.Close()
+		return nil, err
+	}
 	return a, nil
 }
 
-func (a *App) openFileAt(path string, line, col int) {
-	a.openFile(path)
-	tab := a.activeTabPtr()
-	if tab == nil {
-		return
+// openFileAt positions the requested tab only after it was safely opened.
+func (a *App) openFileAt(path string, line, col int) error {
+	if err := a.openFile(path); err != nil {
+		return err
 	}
-	tab.MoveCursorTo(editor.Position{Line: max(1, line) - 1, Col: max(1, col) - 1}, false)
+	tab := a.activeTabPtr()
+	if tab != nil {
+		tab.MoveCursorTo(editor.Position{Line: max(1, line) - 1, Col: max(1, col) - 1}, false)
+	}
+	return nil
 }
 
 // loadCustomActions reads the user's actions.json (if any) and stores
@@ -960,10 +989,21 @@ func (a *App) stopTreeRefresh() {
 	}
 }
 
-// Close releases the terminal back to the user. Always call this before exit.
+// closeTabs releases held originals without changing the retained tab models.
+// Tab.Close is idempotent and harmless for ordinary or generated tabs.
+func (a *App) closeTabs() {
+	for _, tab := range a.tabs {
+		if err := tab.Close(); err != nil {
+			a.flash(fmt.Sprintf("Close failed: %v", err))
+		}
+	}
+}
+
+// Close releases tab handles and the terminal. Always call this before exit.
 func (a *App) Close() {
 	a.stopTreeRefresh()
 	a.stopAutoScroll()
+	a.closeTabs()
 	if a.screen != nil {
 		a.screen.Fini()
 	}
@@ -974,6 +1014,7 @@ func (a *App) Close() {
 // lets trackpad events outrun the renderer and turns a flick into a delayed,
 // stair-stepped queue; batching keeps the viewport current with the gesture.
 func (a *App) Run() error {
+	defer a.closeTabs()
 	a.width, a.height = a.screen.Size()
 	if !a.explorer {
 		a.startLSP()
@@ -997,18 +1038,20 @@ func (a *App) Run() error {
 			time.Sleep(wait)
 			a.handlePendingEvents()
 		}
-		a.draw()
 		if !a.explorer {
+			// Apply shared mutations before drawing or publishing: the visible
+			// frame and companion snapshots must describe the selected target.
+			a.consumeOpenRequest()
+			a.consumeDebugRequest()
 			// syncBreakpoints runs BEFORE publishDebug: the panel's breakpoint list
 			// comes out of a.breakpoints, and publishing first would mirror a set
 			// that is one event behind the marks the user can see in the gutter.
 			a.syncBreakpoints()
 			a.publishActive()
 			a.publishDebug()
-			a.consumeOpenRequest()
-			a.consumeDebugRequest()
 			a.maybeSyncLSP()
 		}
+		a.draw()
 		a.screen.Show()
 		lastRender = time.Now()
 	}
@@ -1016,6 +1059,8 @@ func (a *App) Run() error {
 	if a.explorer {
 		return nil
 	}
+	// Isolated panes have nil channels; Set/Flush are nil-safe, so local debug
+	// teardown still runs without publishing idle or flushing shared state.
 	a.active.Flush() // do not lose the final position inside the debounce window
 	// 🔴 The CLEAN-EXIT half of the staleness contract, and it belongs in this
 	// block rather than beside stopDebugSession below: a panel that outlives the
@@ -1075,11 +1120,13 @@ func (a *App) publishActive() {
 // it in a real editor with a language server attached — rather than reading the
 // diff in one pane and hunting for the line in another.
 //
-// The sequence number is the whole guard. Without it the editor either reopens
-// the same file on every tick or ignores every request after the first; with it
-// a request is honoured exactly once, and a stale file left on disk from an
-// earlier session can never yank the user somewhere they did not ask to go.
+// The sequence number prevents replay within this editor, not attribution:
+// ordinary editors honour a stale request once at startup. Dedicated link/edit
+// panes instead bypass all shared requests at both receiver entry points.
 func (a *App) consumeOpenRequest() {
+	if a.isolated {
+		return // leave the shared request available to ordinary editors
+	}
 	req, ok := state.ReadOpenRequest()
 	if !ok || req.Seq <= a.lastOpenSeq {
 		return
@@ -2325,10 +2372,11 @@ func (a *App) flash(msg string) {
 func (a *App) OpenFile(path string) { a.openFile(path) }
 
 // openFile opens the file at path in a new tab — or switches to it if it is
-// already open in another tab. Errors are surfaced as a flash message.
+// already open in another tab. Errors are returned and flashed; editable isolated
+// tabs must bind their loaded original before registration or any git/LSP use.
 // Whatever the path resolves to, its parent becomes the active folder so
 // the next New File from the main menu lands next to it.
-func (a *App) openFile(path string) {
+func (a *App) openFile(path string) error {
 	if abs, err := filepath.Abs(path); err == nil {
 		path = abs
 	}
@@ -2353,13 +2401,22 @@ func (a *App) openFile(path string) {
 		if t.Path == path {
 			a.activeTab = i
 			a.refreshTabGitState(t)
-			return
+			return nil
 		}
 	}
 	t, err := editor.NewTab(path)
 	if err != nil {
 		a.flash(fmt.Sprintf("Error: %v", err))
-		return
+		return err
+	}
+	// Read-only previews cannot write through Save; only editable disk tabs bind.
+	if a.isolated && !t.IsImage() && !t.Synthetic {
+		if err := t.BindOriginal(); err != nil {
+			_ = t.Close()
+			err = fmt.Errorf("cannot bind %s: %w", path, err)
+			a.flash(fmt.Sprintf("Error: %v", err))
+			return err
+		}
 	}
 	a.tabs = append(a.tabs, t)
 	a.activeTab = len(a.tabs) - 1
@@ -2368,6 +2425,7 @@ func (a *App) openFile(path string) {
 	// is what actually starts the flow. It also spawns the server on the first file of a language.
 	a.lspDidOpen(t.Path, t.Buffer.String())
 	a.flash(fmt.Sprintf("Opened %s", filepath.Base(path)))
+	return nil
 }
 
 // saveActiveTab writes the active tab's buffer to disk.
@@ -2406,7 +2464,11 @@ func (a *App) saveTabAt(idx int) bool {
 	// formatter never blocks the user's save from landing. The
 	// formatter (when configured + trusted) reloads the buffer
 	// asynchronously via formatDoneEvent — see format.go.
-	a.runFormatOnSave(idx)
+	// ponytail: a pathname formatter would undo identity-bound saving if the
+	// path changed after the verified write. Exact-file panes skip it entirely.
+	if !a.isolated {
+		a.runFormatOnSave(idx)
+	}
 	return true
 }
 
@@ -2478,6 +2540,9 @@ func (a *App) closeTab(idx int) {
 		return
 	}
 	a.lspDidClose(a.tabs[idx].Path)
+	if err := a.tabs[idx].Close(); err != nil {
+		a.flash(fmt.Sprintf("Close failed: %v", err))
+	}
 	a.tabs = append(a.tabs[:idx], a.tabs[idx+1:]...)
 	if a.activeTab >= len(a.tabs) {
 		a.activeTab = len(a.tabs) - 1

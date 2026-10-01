@@ -1475,6 +1475,9 @@ func (a *App) drawDebugGutter() {
 // changed: the publisher compares ignoring its own timestamp and writes at most
 // one file per debounce window.
 func (a *App) publishDebug() {
+	if a.debugPub == nil {
+		return // isolated panes keep local debugging without building a panel payload
+	}
 	a.debugPub.Set(a.debugSnapshot())
 }
 
@@ -1483,7 +1486,8 @@ func (a *App) publishDebug() {
 // panel opened afterwards shows nothing rather than the last stop.
 //
 // Flushed rather than merely Set, because the debounce window outlives the
-// shutdown block it is called from.
+// shutdown block it is called from. Nil-safe Set/Flush leave isolated panes'
+// shared state untouched while Run still tears down their local debug session.
 func (a *App) publishDebugIdle() {
 	a.debugPub.Set(state.DebugSession{State: state.DebugStateIdle, Root: a.rootDir})
 	a.debugPub.Flush()
@@ -1578,6 +1582,12 @@ func (a *App) breakpointVerified(b Breakpoint) bool {
 // applies withinRoot), which is the case where landing in the wrong editor would
 // edit the wrong file.
 func (a *App) consumeDebugRequest() {
+	// Dedicated link/edit panes must reject ALL global actions, including
+	// pathless session control and fresh sibling-file toggles. Local keyboard
+	// and menu debugging still call their actions directly and remain allowed.
+	if a.isolated {
+		return
+	}
 	req, ok := state.ReadDebugRequest()
 	if !ok || req.Seq <= a.lastDebugSeq || req.Seq <= debugRequestFloor {
 		return

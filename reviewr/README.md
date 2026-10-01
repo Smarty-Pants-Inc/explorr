@@ -110,7 +110,10 @@ review comment. The source opens as a native, single-file Explorr editor in
 another explicit, unfocused right split. Reviewr remains the read/review pane;
 it does not write the original. Removed historical lines are not valid current
 source edit targets. A failed launch is shown as an error, not reported as a
-successful edit.
+successful edit. Dedicated native editors reject global open/debug panel requests and do not
+publish shared editor state. Text saves bind the original file and parent directory; replacing
+either makes Save fail while retaining the dirty buffer. Automatic path-based format-on-save
+is disabled in these panes, without changing ordinary project editors.
 
 ## Durable comments and agent reading
 
@@ -166,6 +169,10 @@ repaired/overwritten. A persistent `.reviewr.json.lock` file holds an advisory
 single-writer lock while the viewer is alive; exit releases the lock without
 removing the inode. Do not delete an active lock to bypass the one-writer rule.
 Atomic replacement allows agents to read complete snapshots without that lock.
+Snapshot reads, temporary files, rename and cleanup are bound to the opened parent directory.
+Replacing that directory or the lock entry makes a save fail and preserves the comment draft;
+it cannot redirect the snapshot into another directory. Ordinary atomic replacement of the
+source file within the same unchanged parent remains supported.
 Persistence here is specific to `--file` document mode, not a promise that all
 upstream Git-review sessions are durable. Send remains optional notification,
 not the durable store or proof an agent submitted a message.

@@ -59,6 +59,7 @@ type cliResult struct {
 	OpenLine   int
 	OpenCol    int
 	ReviewFile bool // explicit ?review=1, in addition to Markdown's default route
+	Isolated   bool // dedicated --single-file-at launch; ignore shared panel requests
 
 	// DebugAction and HerdRAction hold their validated subcommands.
 	// Both are empty for every other action.
@@ -359,7 +360,7 @@ func resolveArgs(args []string) cliResult {
 		}
 		return cliResult{
 			Action: actionEdit, RootDir: filepath.Dir(args[1]), OpenFile: args[1],
-			OpenLine: line, OpenCol: col,
+			OpenLine: line, OpenCol: col, Isolated: true,
 		}
 	case "--debug":
 		// Drive an ALREADY-RUNNING editor's debugger. Same mechanism as
@@ -520,6 +521,8 @@ func main() {
 	switch {
 	case res.Action == actionExplorer:
 		a, err = app.NewExplorer(res.RootDir)
+	case res.Isolated:
+		a, err = app.NewIsolatedSingleFileAt(res.OpenFile, res.OpenLine, res.OpenCol)
 	case res.OpenFile != "":
 		a, err = app.NewSingleFileAt(res.OpenFile, res.OpenLine, res.OpenCol)
 	default:

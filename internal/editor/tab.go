@@ -258,6 +258,12 @@ type Tab struct {
 	// real tab; a 2-space-indented file gets two spaces. Mixed-style
 	// files take the dominant signal.
 	IndentUnit string
+
+	// loadedInfo records the inode actually read, not a later path lookup.
+	// Binding is explicit: ordinary tabs keep their historical save semantics.
+	loadedInfo    os.FileInfo
+	originalBound bool
+	original      *boundOriginal
 }
 
 // NewTab opens path and returns a Tab. If the file does not exist, the tab
@@ -271,16 +277,15 @@ func NewTab(path string) (*Tab, error) {
 	}
 	var data []byte
 	var mtime time.Time
+	var loadedInfo os.FileInfo
 	if path != "" {
-		b, err := os.ReadFile(path)
+		b, info, err := readTabFile(path)
 		if err != nil && !os.IsNotExist(err) {
 			return nil, err
 		}
-		data = b
-		// Record the on-disk mtime so the app can detect external edits
-		// later. A missing file leaves mtime as the zero value, which is
-		// fine — the reconcile loop handles that case explicitly.
-		if info, statErr := os.Stat(path); statErr == nil {
+		data, loadedInfo = b, info
+		// A missing file leaves mtime zero for disk reconciliation.
+		if info != nil {
 			mtime = info.ModTime()
 		}
 	}
@@ -290,6 +295,7 @@ func NewTab(path string) (*Tab, error) {
 		StyleStale: true,
 		Wrap:       true,
 		Mtime:      mtime,
+		loadedInfo: loadedInfo,
 	}
 	t.IndentUnit = DetectIndent(t.Buffer.Lines, path)
 	// Record the on-open buffer state so RevertFile has somewhere to
@@ -353,6 +359,8 @@ func (t *Tab) DisplayName() string {
 // is refreshed so the disk-reconcile loop doesn't immediately think the
 // file we just wrote was changed by someone else. Image tabs return an
 // error since the editor only knows how to read those, not re-encode them.
+// BindOriginal opts isolated editors into no-follow, identity-checked saving;
+// identity rejection leaves Dirty and the bound original untouched.
 func (t *Tab) Save() error {
 	if t.IsImage() {
 		return fmt.Errorf("image tabs are read-only")
@@ -363,14 +371,25 @@ func (t *Tab) Save() error {
 	if t.Path == "" {
 		return fmt.Errorf("no path set for tab")
 	}
-	if err := os.WriteFile(t.Path, []byte(t.Buffer.String()), 0644); err != nil {
-		return err
+	if t.originalBound {
+		if t.original == nil {
+			return fmt.Errorf("original binding is unavailable")
+		}
+		info, err := t.original.save(t.Path, []byte(t.Buffer.String()))
+		if err != nil {
+			return err
+		}
+		t.Mtime = info.ModTime()
+	} else {
+		if err := os.WriteFile(t.Path, []byte(t.Buffer.String()), 0644); err != nil {
+			return err
+		}
+		if info, err := os.Stat(t.Path); err == nil {
+			t.Mtime = info.ModTime()
+		}
 	}
 	t.Dirty = false
 	t.DiskGone = false
-	if info, err := os.Stat(t.Path); err == nil {
-		t.Mtime = info.ModTime()
-	}
 	// Save is a natural logical-step boundary: the next typing burst is
 	// clearly a separate intent, so don't let it merge into whatever was
 	// in flight before the save.
@@ -380,7 +399,11 @@ func (t *Tab) Save() error {
 	// are guaranteed to agree, so it's the natural point to snapshot.
 	// Deliberately ignored: persistence is a convenience, never allowed to
 	// turn a successful Save into a reported failure.
-	_ = t.PersistUndo()
+	// Bound saves must not re-read the mutable path through PersistUndo:
+	// it follows symlinks and is only an optional convenience.
+	if !t.originalBound {
+		_ = t.PersistUndo()
+	}
 	return nil
 }
 
@@ -389,7 +412,8 @@ func (t *Tab) Save() error {
 // instead of getting snapped to line 0); ScrollY is left alone and gets
 // clamped on the next render. Dirty is cleared and the syntax cache is
 // invalidated. Image tabs decode the file again instead of replacing
-// the text buffer.
+// the text buffer. A bound tab never follows a final symlink or a changed
+// parent; only a clean bound tab can adopt a replacement regular-file identity.
 func (t *Tab) Reload() error {
 	if t.Path == "" {
 		return fmt.Errorf("no path set for tab")
@@ -409,14 +433,21 @@ func (t *Tab) Reload() error {
 		t.DiskGone = false
 		return nil
 	}
-	data, err := os.ReadFile(t.Path)
+	var data []byte
+	var info os.FileInfo
+	var err error
+	if t.originalBound {
+		if t.original == nil {
+			return fmt.Errorf("original binding is unavailable")
+		}
+		data, info, err = t.original.reload(t.Path, !t.Dirty)
+	} else {
+		data, info, err = readTabFile(t.Path)
+	}
 	if err != nil {
 		return err
 	}
-	info, err := os.Stat(t.Path)
-	if err != nil {
-		return err
-	}
+	t.loadedInfo = info
 	t.Buffer = NewBuffer(string(data))
 	t.Cursor = t.Buffer.Clamp(t.Cursor)
 	t.Anchor = t.Cursor // drop any selection — line indices may have shifted.

@@ -1,3 +1,29 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index d1cff8e..ebc8a14 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -911,6 +911,7 @@ dependencies = [
+  "fff-search",
+  "pulldown-cmark",
+  "ratatui",
++ "rustix",
+  "serde",
+  "serde_json",
+  "similar",
+diff --git a/Cargo.toml b/Cargo.toml
+index 6add628..6013362 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -27,6 +27,9 @@ toml = "1.1"
+ two-face = "0.5.1"
+ unicode-width = "0.2"
+ 
++[target.'cfg(unix)'.dependencies]
++rustix = { version = "1", features = ["fs"] }
++
+ [dev-dependencies]
+ tempfile = "3"
+ 
 diff --git a/src/app.rs b/src/app.rs
 index 49829b8..9986f8e 100644
 --- a/src/app.rs
@@ -985,589 +1011,1088 @@ index 39baa9a..e4ceefc 100644
          let c = parse(&["--poll", "500", "--base", "origin/dev", "/tmp/work"]);
 diff --git a/src/document.rs b/src/document.rs
 new file mode 100644
-index 0000000..af7cbf6
+index 0000000..adfa274
 --- /dev/null
 +++ b/src/document.rs
-@@ -0,0 +1,581 @@
+@@ -0,0 +1,1080 @@
 +//! Single-document comment snapshots, separate from the git review model.
 +//!
 +//! The approved document-mode contract persists the seven fields in
 +//! `specs/review-model.md` beside the canonical original, without modifying it.
 +
-+use std::fs::{self, File, Metadata, OpenOptions};
-+use std::io::{self, Read, Write};
-+use std::path::{Path, PathBuf};
-+use std::sync::atomic::{AtomicU64, Ordering};
++#[cfg(unix)]
++pub use unix::Document;
 +
-+use anyhow::{Context, Result, bail};
-+use serde::{Deserialize, Serialize};
++#[cfg(unix)]
++mod unix {
++    use std::ffi::OsStr;
++    use std::fs::File;
++    use std::io::{self, Read, Write};
++    use std::path::{Path, PathBuf};
++    use std::sync::atomic::{AtomicU64, Ordering};
 +
-+use crate::model::{Comment, CommentStore};
++    use anyhow::{Context, Result, bail};
++    use rustix::fs::{self as rfs, AtFlags, FileType, Mode, OFlags, Stat};
++    use rustix::io::Errno;
++    use serde::{Deserialize, Serialize};
 +
-+const SCHEMA_VERSION: u32 = 1;
-+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
++    use crate::model::{Comment, CommentStore};
 +
-+/// A canonical regular original and its single-writer sidecar lease.
-+///
-+/// The lock file is deliberately never removed: unlinking it could let another
-+/// writer lock a different inode while this document still holds the old one.
-+/// Closing the file, including process exit, releases the advisory lock.
-+#[derive(Debug)]
-+pub struct Document {
-+    path: PathBuf,
-+    sidecar: PathBuf,
-+    _lock: File,
-+}
++    const SCHEMA_VERSION: u32 = 1;
++    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 +
-+/// Only the agreed canonical snapshot fields are accepted or emitted.
-+#[derive(Debug, Serialize, Deserialize)]
-+#[serde(deny_unknown_fields)]
-+struct Snapshot {
-+    schema_version: u32,
-+    document: PathBuf,
-+    comments: Vec<Comment>,
-+}
++    /// A canonical regular original and its single-writer sidecar lease.
++    ///
++    /// The lock file is deliberately never removed: unlinking it could let another
++    /// writer lock a different inode while this document still holds the old one.
++    /// Drop explicitly unlocks the owned lease: closing only this descriptor would
++    /// retain the lock while a forked child holds the same open file description.
++    #[derive(Debug)]
++    pub struct Document {
++        path: PathBuf,
++        sidecar: PathBuf,
++        // Every sidecar operation uses this directory, not the mutable ancestor path.
++        directory: File,
++        lock: File,
++    }
 +
-+impl Document {
-+    /// Resolve the original, acquire a nonblocking writer lock, and restore comments.
-+    /// Missing snapshots start empty; invalid existing snapshots are never repaired.
-+    pub fn open(path: &Path) -> Result<(Self, CommentStore)> {
-+        let path = path.canonicalize().with_context(|| format!("resolve {}", path.display()))?;
-+        if !fs::metadata(&path)?.is_file() {
-+            bail!("document is not a regular file: {}", path.display());
-+        }
-+        path.to_str().context("document path is not UTF-8")?;
-+        let sidecar = append_suffix(&path, ".reviewr.json");
-+        let lock_path = append_suffix(&sidecar, ".lock");
-+        let lock = open_lock(&lock_path)?;
-+        lock.try_lock().with_context(|| {
-+            format!("document already locked or lock unavailable: {}", path.display())
-+        })?;
-+        let snapshot = read_snapshot(&sidecar, &path)?;
-+        let mut comments = CommentStore::new();
-+        if let Some(snapshot) = snapshot {
-+            for comment in snapshot.comments {
-+                comments.add(comment);
++    /// Only the agreed canonical snapshot fields are accepted or emitted.
++    #[derive(Debug, Serialize, Deserialize)]
++    #[serde(deny_unknown_fields)]
++    struct Snapshot {
++        schema_version: u32,
++        document: PathBuf,
++        comments: Vec<Comment>,
++    }
++
++    impl Document {
++        /// Resolve the original, acquire a nonblocking writer lock, and restore comments.
++        /// Missing snapshots start empty; invalid existing snapshots are never repaired.
++        pub fn open(path: &Path) -> Result<(Self, CommentStore)> {
++            let path =
++                path.canonicalize().with_context(|| format!("resolve {}", path.display()))?;
++            path.to_str().context("document path is not UTF-8")?;
++            let parent = path.parent().context("document has no parent directory")?;
++            let directory = open_directory(parent)?;
++            verify_parent(&directory, &path)?;
++            regular_entry(&directory, &path)?.context("document is missing")?;
++            let sidecar = append_suffix(&path, ".reviewr.json");
++            let lock_path = append_suffix(&sidecar, ".lock");
++            let lock = open_lock(&directory, &lock_path)?;
++            lock.try_lock().with_context(|| {
++                format!("document already locked or lock unavailable: {}", path.display())
++            })?;
++            // Construct only after acquisition succeeds, but before fallible
++            // validation, so every owned-lease exit explicitly unlocks it.
++            let document = Self { path, sidecar, directory, lock };
++            check_opened_entry(&document.directory, &lock_path, &document.lock)?;
++            let snapshot = read_snapshot(&document.directory, &document.sidecar, &document.path)?;
++            document.verify_location()?;
++            let mut comments = CommentStore::new();
++            if let Some(snapshot) = snapshot {
++                for comment in snapshot.comments {
++                    comments.add(comment);
++                }
 +            }
++            Ok((document, comments))
 +        }
-+        Ok((Self { path, sidecar, _lock: lock }, comments))
-+    }
 +
-+    /// The absolute canonical original, never its sidecar or an alias.
-+    pub fn path(&self) -> &Path {
-+        &self.path
-+    }
++        /// The absolute canonical original, never its sidecar or an alias.
++        pub fn path(&self) -> &Path {
++            &self.path
++        }
 +
-+    /// Atomically replace the snapshot while retaining the document's writer lock.
-+    /// A write or sync failure leaves the previous snapshot untouched.
-+    pub fn save(&self, comments: &CommentStore) -> Result<()> {
-+        self.save_with(comments, |file, bytes| file.write_all(bytes))
-+    }
++        /// Atomically replace the snapshot while retaining the document's writer lock.
++        /// A write or sync failure leaves the previous snapshot untouched.
++        pub fn save(&self, comments: &CommentStore) -> Result<()> {
++            self.save_with(comments, |file, bytes| file.write_all(bytes))
++        }
 +
-+    /// Publish through a fresh inode; separating the write permits partial-I/O tests.
-+    fn save_with(
-+        &self,
-+        comments: &CommentStore,
-+        write: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
-+    ) -> Result<()> {
-+        // Refuse even an externally replaced invalid snapshot rather than overwriting
-+        // it. The advisory lock coordinates other reviewr writers, not arbitrary tools.
-+        read_snapshot(&self.sidecar, &self.path)?;
-+        let snapshot = Snapshot {
-+            schema_version: SCHEMA_VERSION,
-+            document: self.path.clone(),
-+            comments: comments.iter().cloned().collect(),
-+        };
-+        validate_snapshot(&snapshot, &self.path)?;
-+        let mut bytes = serde_json::to_vec_pretty(&snapshot).context("encode document comments")?;
-+        bytes.push(b'\n');
-+        let mut temp = PendingSnapshot::create(&self.sidecar)?;
-+        let file = temp.file.as_mut().context("comment temporary is closed")?;
-+        write(file, &bytes)
-+            .with_context(|| format!("write comment snapshot {}", temp.path.display()))?;
-+        file.sync_all()
-+            .with_context(|| format!("sync comment snapshot {}", temp.path.display()))?;
-+        drop(temp.file.take());
-+        // Check again after the write: never knowingly rename over a symlink, a
-+        // malformed snapshot, or a snapshot belonging to another document.
-+        read_snapshot(&self.sidecar, &self.path)?;
-+        fs::rename(&temp.path, &self.sidecar)
++        /// Publish through a fresh inode; separating the write permits partial-I/O tests.
++        fn save_with(
++            &self,
++            comments: &CommentStore,
++            write: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
++        ) -> Result<()> {
++            // Refuse even an externally replaced invalid snapshot rather than overwriting
++            // it. The advisory lock coordinates other reviewr writers, not arbitrary tools.
++            self.verify_location()?;
++            read_snapshot(&self.directory, &self.sidecar, &self.path)?;
++            let snapshot = Snapshot {
++                schema_version: SCHEMA_VERSION,
++                document: self.path.clone(),
++                comments: comments.iter().cloned().collect(),
++            };
++            validate_snapshot(&snapshot, &self.path)?;
++            let mut bytes =
++                serde_json::to_vec_pretty(&snapshot).context("encode document comments")?;
++            bytes.push(b'\n');
++            let mut temp = PendingSnapshot::create(&self.directory, &self.sidecar)?;
++            let file = temp.file.as_mut().context("comment temporary is closed")?;
++            write(file, &bytes)
++                .with_context(|| format!("write comment snapshot {}", temp.path.display()))?;
++            file.sync_all()
++                .with_context(|| format!("sync comment snapshot {}", temp.path.display()))?;
++            // Check again after the write: never knowingly rename over a symlink, a
++            // malformed snapshot, or a snapshot belonging to another document.
++            read_snapshot(&self.directory, &self.sidecar, &self.path)?;
++            check_opened_entry(&temp.directory, &temp.path, file)?;
++            self.verify_location()?;
++            // A later ancestor swap cannot redirect either operand: both are basenames
++            // in the held directory. renameat also never follows a final symlink.
++            rfs::renameat(
++                &temp.directory,
++                entry_name(&temp.path)?,
++                &self.directory,
++                entry_name(&self.sidecar)?,
++            )
 +            .with_context(|| format!("replace comment snapshot {}", self.sidecar.display()))?;
-+        temp.committed = true;
++            temp.committed = true;
++            Ok(())
++        }
++
++        /// Permit atomic replacement of the original, but never a different parent,
++        /// a missing/non-regular target, or a lock entry no longer naming our lease.
++        fn verify_location(&self) -> Result<()> {
++            verify_parent(&self.directory, &self.path)?;
++            regular_entry(&self.directory, &self.path)?.context("document is missing")?;
++            check_opened_entry(&self.directory, &append_suffix(&self.sidecar, ".lock"), &self.lock)
++        }
++    }
++
++    impl Drop for Document {
++        /// Release only our acquired open-description lease, never a pathname's
++        /// replacement lock or another writer's independently opened descriptor.
++        fn drop(&mut self) {
++            // CLOEXEC closes inherited descriptors at exec, not at fork. Unlock
++            // now rather than waiting for every duplicate to close; never unlink.
++            let _ = self.lock.unlock();
++        }
++    }
++
++    /// Append to the entire filename, including its extension and non-UTF-8 spelling.
++    fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
++        let mut name = path.as_os_str().to_os_string();
++        name.push(suffix);
++        PathBuf::from(name)
++    }
++
++    /// Pass only a final basename to *at operations; ancestors are diagnostic only.
++    fn entry_name(path: &Path) -> Result<&OsStr> {
++        path.file_name().context("document entry has no filename")
++    }
++
++    /// Hold a directory without following its final component as a symlink.
++    fn open_directory(path: &Path) -> Result<File> {
++        let fd = rfs::open(
++            path,
++            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
++            Mode::empty(),
++        )
++        .with_context(|| format!("open document parent {}", path.display()))?;
++        Ok(File::from(fd))
++    }
++
++    /// Compare the current canonical parent to our held directory before a transaction
++    /// and its commit. This detects moves, while dirfd operations close the TOCTOU gap.
++    fn verify_parent(directory: &File, document: &Path) -> Result<()> {
++        let parent = document.parent().context("document has no parent directory")?;
++        let canonical = parent.canonicalize().context("resolve current document parent")?;
++        if canonical.as_os_str() != parent.as_os_str() {
++            bail!("document parent path changed: {}", parent.display());
++        }
++        let current = open_directory(&canonical)?;
++        if !same_inode(&rfs::fstat(directory)?, &rfs::fstat(&current)?) {
++            bail!("document parent directory changed: {}", parent.display());
++        }
 +        Ok(())
 +    }
-+}
 +
-+/// Append to the entire filename, including its extension and non-UTF-8 spelling.
-+fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
-+    let mut name = path.as_os_str().to_os_string();
-+    name.push(suffix);
-+    PathBuf::from(name)
-+}
-+
-+/// Inspect an entry without following symlinks; only absent or regular is allowed.
-+fn regular_entry(path: &Path) -> Result<Option<Metadata>> {
-+    match fs::symlink_metadata(path) {
-+        Ok(metadata) if metadata.file_type().is_file() => Ok(Some(metadata)),
-+        Ok(_) => bail!("refusing non-regular file or symlink: {}", path.display()),
-+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-+        Err(error) => Err(error).with_context(|| format!("inspect {}", path.display())),
++    /// Device and inode together identify the entry without pinning document content.
++    fn same_inode(left: &Stat, right: &Stat) -> bool {
++        left.st_dev == right.st_dev && left.st_ino == right.st_ino
 +    }
-+}
 +
-+/// Confirm an opened file is still the inspected regular entry before using it.
-+fn check_opened_entry(path: &Path, file: &File) -> Result<()> {
-+    let entry =
-+        regular_entry(path)?.with_context(|| format!("file disappeared: {}", path.display()))?;
-+    let opened =
-+        file.metadata().with_context(|| format!("inspect open file {}", path.display()))?;
-+    if !opened.is_file() {
-+        bail!("refusing non-regular open file: {}", path.display());
-+    }
-+    #[cfg(unix)]
-+    {
-+        use std::os::unix::fs::MetadataExt;
-+        if entry.dev() != opened.dev() || entry.ino() != opened.ino() {
-+            bail!("file changed while opening: {}", path.display());
++    /// Inspect a held-directory entry without following symlinks; absent or regular only.
++    fn regular_entry(directory: &File, path: &Path) -> Result<Option<Stat>> {
++        match rfs::statat(directory, entry_name(path)?, AtFlags::SYMLINK_NOFOLLOW) {
++            Ok(stat) if FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile => {
++                Ok(Some(stat))
++            }
++            Ok(_) => bail!("refusing non-regular file or symlink: {}", path.display()),
++            Err(Errno::NOENT) => Ok(None),
++            Err(error) => Err(error).with_context(|| format!("inspect {}", path.display())),
 +        }
 +    }
-+    #[cfg(not(unix))]
-+    let _ = entry;
-+    Ok(())
-+}
 +
-+/// Create private files exclusively; existing lock contents are never truncated.
-+fn private_options() -> OpenOptions {
-+    let mut options = OpenOptions::new();
-+    options.read(true).write(true).create_new(true);
-+    #[cfg(unix)]
-+    {
-+        use std::os::unix::fs::OpenOptionsExt;
-+        options.mode(0o600);
-+    }
-+    options
-+}
-+
-+/// Open a persistent lock inode, refusing symlinks and preserving existing bytes.
-+fn open_lock(path: &Path) -> Result<File> {
-+    regular_entry(path)?;
-+    let file = match private_options().open(path) {
-+        Ok(file) => file,
-+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-+            regular_entry(path)?;
-+            OpenOptions::new()
-+                .read(true)
-+                .write(true)
-+                .open(path)
-+                .with_context(|| format!("open document lock {}", path.display()))?
++    /// Confirm an opened regular file still names the inspected held-directory entry.
++    fn check_opened_entry(directory: &File, path: &Path, file: &File) -> Result<()> {
++        let entry = regular_entry(directory, path)?
++            .with_context(|| format!("file disappeared: {}", path.display()))?;
++        let opened =
++            rfs::fstat(file).with_context(|| format!("inspect open file {}", path.display()))?;
++        if FileType::from_raw_mode(opened.st_mode) != FileType::RegularFile
++            || !same_inode(&entry, &opened)
++        {
++            bail!("file changed or is not regular: {}", path.display());
 +        }
-+        Err(error) => {
-+            return Err(error).with_context(|| format!("create document lock {}", path.display()));
-+        }
-+    };
-+    check_opened_entry(path, &file)?;
-+    Ok(file)
-+}
-+
-+/// Read and validate a complete snapshot without ever opening it for writing.
-+fn read_snapshot(sidecar: &Path, document: &Path) -> Result<Option<Snapshot>> {
-+    if regular_entry(sidecar)?.is_none() {
-+        return Ok(None);
++        Ok(())
 +    }
-+    let mut file = File::open(sidecar)
++
++    /// Private exclusive creation; NOFOLLOW and EXCL also reject final-entry symlinks.
++    fn create_private(directory: &File, path: &Path) -> rustix::io::Result<File> {
++        // All callers generate a basename-bearing path from the canonical document.
++        let name = path.file_name().ok_or(Errno::INVAL)?;
++        let fd = rfs::openat(
++            directory,
++            name,
++            OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
++            Mode::RUSR | Mode::WUSR,
++        )?;
++        Ok(File::from(fd))
++    }
++
++    /// Open the persistent lease without truncation, symlink traversal, or FIFO blocking.
++    fn open_lock(directory: &File, path: &Path) -> Result<File> {
++        regular_entry(directory, path)?;
++        let file = match create_private(directory, path) {
++            Ok(file) => file,
++            Err(Errno::EXIST) => {
++                regular_entry(directory, path)?;
++                let fd = rfs::openat(
++                    directory,
++                    entry_name(path)?,
++                    OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
++                    Mode::empty(),
++                )
++                .with_context(|| format!("open document lock {}", path.display()))?;
++                File::from(fd)
++            }
++            Err(error) => {
++                return Err(error)
++                    .with_context(|| format!("create document lock {}", path.display()));
++            }
++        };
++        check_opened_entry(directory, path, &file)?;
++        Ok(file)
++    }
++
++    /// Read and validate a complete snapshot without ever opening it for writing.
++    fn read_snapshot(
++        directory: &File,
++        sidecar: &Path,
++        document: &Path,
++    ) -> Result<Option<Snapshot>> {
++        if regular_entry(directory, sidecar)?.is_none() {
++            return Ok(None);
++        }
++        let fd = rfs::openat(
++            directory,
++            entry_name(sidecar)?,
++            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
++            Mode::empty(),
++        )
 +        .with_context(|| format!("open comment snapshot {}", sidecar.display()))?;
-+    check_opened_entry(sidecar, &file)?;
-+    let mut bytes = Vec::new();
-+    file.read_to_end(&mut bytes)
-+        .with_context(|| format!("read comment snapshot {}", sidecar.display()))?;
-+    let snapshot: Snapshot = serde_json::from_slice(&bytes)
-+        .with_context(|| format!("invalid comment snapshot {}", sidecar.display()))?;
-+    validate_snapshot(&snapshot, document)?;
-+    Ok(Some(snapshot))
-+}
++        let mut file = File::from(fd);
++        check_opened_entry(directory, sidecar, &file)?;
++        let mut bytes = Vec::new();
++        file.read_to_end(&mut bytes)
++            .with_context(|| format!("read comment snapshot {}", sidecar.display()))?;
++        let snapshot: Snapshot = serde_json::from_slice(&bytes)
++            .with_context(|| format!("invalid comment snapshot {}", sidecar.display()))?;
++        validate_snapshot(&snapshot, document)?;
++        Ok(Some(snapshot))
++    }
 +
-+/// Refuse foreign files or unusable anchors without rebasing or rewriting comments.
-+fn validate_snapshot(snapshot: &Snapshot, document: &Path) -> Result<()> {
-+    if snapshot.schema_version != SCHEMA_VERSION {
-+        bail!("unsupported comment schema version: {}", snapshot.schema_version);
-+    }
-+    if snapshot.document.as_os_str() != document.as_os_str() {
-+        bail!("comment snapshot belongs to another document: {}", snapshot.document.display());
-+    }
-+    let file = document.to_str().context("document path is not UTF-8")?;
-+    for comment in &snapshot.comments {
-+        if comment.file != file {
-+            bail!("comment belongs to another document: {}", comment.file);
++    /// Refuse foreign files or unusable anchors without rebasing or rewriting comments.
++    fn validate_snapshot(snapshot: &Snapshot, document: &Path) -> Result<()> {
++        if snapshot.schema_version != SCHEMA_VERSION {
++            bail!("unsupported comment schema version: {}", snapshot.schema_version);
 +        }
-+        if comment.start == 0 || comment.end < comment.start {
-+            bail!("invalid inclusive comment range: {}-{}", comment.start, comment.end);
++        if snapshot.document.as_os_str() != document.as_os_str() {
++            bail!("comment snapshot belongs to another document: {}", snapshot.document.display());
++        }
++        let file = document.to_str().context("document path is not UTF-8")?;
++        for comment in &snapshot.comments {
++            if comment.file != file {
++                bail!("comment belongs to another document: {}", comment.file);
++            }
++            if comment.start == 0 || comment.end < comment.start {
++                bail!("invalid inclusive comment range: {}-{}", comment.start, comment.end);
++            }
++        }
++        Ok(())
++    }
++
++    /// A same-directory exclusive temporary, removed on every pre-rename failure.
++    #[derive(Debug)]
++    struct PendingSnapshot {
++        path: PathBuf,
++        file: Option<File>,
++        // Own a duplicate so cleanup remains bound even if the parent path is moved.
++        directory: File,
++        committed: bool,
++    }
++
++    impl PendingSnapshot {
++        /// Retry collisions without touching another writer's temporary file.
++        fn create(directory: &File, sidecar: &Path) -> Result<Self> {
++            let directory = directory.try_clone().context("retain comment temporary directory")?;
++            for _ in 0..128 {
++                let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
++                let path =
++                    append_suffix(sidecar, &format!(".tmp.{}.{sequence}", std::process::id()));
++                match create_private(&directory, &path) {
++                    Ok(file) => {
++                        return Ok(Self { path, file: Some(file), directory, committed: false });
++                    }
++                    Err(Errno::EXIST) => {}
++                    Err(error) => {
++                        return Err(error).with_context(|| {
++                            format!("create comment temporary {}", path.display())
++                        });
++                    }
++                }
++            }
++            bail!("could not create a unique comment temporary for {}", sidecar.display())
 +        }
 +    }
-+    Ok(())
-+}
 +
-+/// A same-directory exclusive temporary, removed on every pre-rename failure.
-+#[derive(Debug)]
-+struct PendingSnapshot {
-+    path: PathBuf,
-+    file: Option<File>,
-+    committed: bool,
-+}
-+
-+impl PendingSnapshot {
-+    /// Retry collisions without touching another writer's temporary file.
-+    fn create(sidecar: &Path) -> Result<Self> {
-+        for _ in 0..128 {
-+            let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-+            let path = append_suffix(sidecar, &format!(".tmp.{}.{sequence}", std::process::id()));
-+            match private_options().open(&path) {
-+                Ok(file) => return Ok(Self { path, file: Some(file), committed: false }),
-+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-+                Err(error) => {
-+                    return Err(error)
-+                        .with_context(|| format!("create comment temporary {}", path.display()));
++    impl Drop for PendingSnapshot {
++        fn drop(&mut self) {
++            if !self.committed {
++                // unlinkat does not follow final symlinks or the moved ancestor path.
++                // Do not remove someone else's replacement of our temporary either.
++                if let Some(file) = &self.file {
++                    if check_opened_entry(&self.directory, &self.path, file).is_ok() {
++                        if let Ok(name) = entry_name(&self.path) {
++                            let _ = rfs::unlinkat(&self.directory, name, AtFlags::empty());
++                        }
++                    }
 +                }
 +            }
 +        }
-+        bail!("could not create a unique comment temporary for {}", sidecar.display())
 +    }
-+}
 +
-+impl Drop for PendingSnapshot {
-+    fn drop(&mut self) {
-+        if !self.committed {
-+            // Close before removal for platforms that cannot unlink an open file.
-+            drop(self.file.take());
-+            let _ = fs::remove_file(&self.path);
++    #[cfg(test)]
++    mod tests {
++        use super::*;
++        use crate::model::Side;
++        use std::fs;
++
++        /// An ordinary original with deliberate extension and nonempty content.
++        fn original(dir: &Path) -> PathBuf {
++            let path = dir.join("notes 日本語.test.md");
++            fs::write(&path, "original body\n").unwrap();
++            path.canonicalize().unwrap()
 +        }
-+    }
-+}
 +
-+#[cfg(test)]
-+mod tests {
-+    use super::*;
-+    use crate::model::Side;
-+
-+    /// An ordinary original with deliberate extension and nonempty content.
-+    fn original(dir: &Path) -> PathBuf {
-+        let path = dir.join("notes 日本語.test.md");
-+        fs::write(&path, "original body\n").unwrap();
-+        path.canonicalize().unwrap()
-+    }
-+
-+    /// Both anchor types, both sides, and verbatim multiline/Unicode field content.
-+    fn comments(path: &Path) -> CommentStore {
-+        let file = path.canonicalize().unwrap().to_str().unwrap().to_owned();
-+        let mut comments = CommentStore::new();
-+        comments.add(Comment {
-+            file: file.clone(),
-+            side: Side::Old,
-+            start: 7,
-+            end: 11,
-+            lines: "-old\n context\n\tquoted \"text\"\n".into(),
-+            text: "  multiline\n\nreview 🦀\0\r\n".into(),
-+            diff_anchored: true,
-+        });
-+        comments.add(Comment {
-+            file,
-+            side: Side::New,
-+            start: 20,
-+            end: 20,
-+            lines: " plain content\n".into(),
-+            text: String::new(),
-+            diff_anchored: false,
-+        });
-+        comments
-+    }
-+
-+    /// Compare all seven fields and insertion order, not just visible text.
-+    fn assert_comments(actual: &CommentStore, expected: &CommentStore) {
-+        assert_eq!(actual.iter().collect::<Vec<_>>(), expected.iter().collect::<Vec<_>>());
-+    }
-+
-+    #[test]
-+    fn roundtrip_all_fields_and_canonical_json_without_touching_original() {
-+        let dir = tempfile::tempdir().unwrap();
-+        let path = original(dir.path());
-+        let original_bytes = fs::read(&path).unwrap();
-+        let (document, loaded) = Document::open(&path).unwrap();
-+        assert!(loaded.is_empty());
-+        assert_eq!(document.path(), path.canonicalize().unwrap());
-+        let comments = comments(&path);
-+        document.save(&comments).unwrap();
-+        let json: serde_json::Value =
-+            serde_json::from_slice(&fs::read(&document.sidecar).unwrap()).unwrap();
-+        assert_eq!(json.as_object().unwrap().len(), 3);
-+        assert_eq!(json["schema_version"], 1);
-+        assert_eq!(json["document"], document.path().to_str().unwrap());
-+        assert_eq!(json["comments"][0].as_object().unwrap().len(), 7);
-+        assert_eq!(json["comments"][0]["side"], "old");
-+        assert_eq!(json["comments"][1]["side"], "new");
-+        assert_eq!(document.sidecar, append_suffix(&path, ".reviewr.json"));
-+        drop(document);
-+        let (_document, loaded) = Document::open(&path).unwrap();
-+        assert_comments(&loaded, &comments);
-+        assert_eq!(fs::read(&path).unwrap(), original_bytes);
-+    }
-+
-+    #[test]
-+    fn empty_snapshot_reopens_empty() {
-+        let dir = tempfile::tempdir().unwrap();
-+        let path = original(dir.path());
-+        let (document, comments) = Document::open(&path).unwrap();
-+        assert!(!document.sidecar.exists());
-+        document.save(&comments).unwrap();
-+        drop(document);
-+        let (_document, loaded) = Document::open(&path).unwrap();
-+        assert!(loaded.is_empty());
-+    }
-+
-+    #[test]
-+    fn save_changed_clone_preserves_edits_and_deletions() {
-+        let dir = tempfile::tempdir().unwrap();
-+        let path = original(dir.path());
-+        let (document, _) = Document::open(&path).unwrap();
-+        let comments = comments(&path);
-+        document.save(&comments).unwrap();
-+        let mut changed = comments.clone();
-+        assert!(changed.edit(0, "edited\nverbatim  ".into()));
-+        assert!(changed.take(1).is_some());
-+        assert_eq!(comments.len(), 2);
-+        assert_ne!(comments.get(0).unwrap().text, changed.get(0).unwrap().text);
-+        document.save(&changed).unwrap();
-+        drop(document);
-+        let (document, loaded) = Document::open(&path).unwrap();
-+        assert_comments(&loaded, &changed);
-+        let mut cleared = loaded.clone();
-+        cleared.take_all();
-+        document.save(&cleared).unwrap();
-+        drop(document);
-+        let (_document, loaded) = Document::open(&path).unwrap();
-+        assert!(loaded.is_empty());
-+    }
-+
-+    #[test]
-+    fn partial_write_failure_preserves_old_json_and_cleans_temporary() {
-+        let dir = tempfile::tempdir().unwrap();
-+        let path = original(dir.path());
-+        let (document, _) = Document::open(&path).unwrap();
-+        let comments = comments(&path);
-+        document.save(&comments).unwrap();
-+        let old = fs::read(&document.sidecar).unwrap();
-+        let result = document.save_with(&CommentStore::new(), |file, bytes| {
-+            file.write_all(&bytes[..bytes.len() / 2])?;
-+            Err(io::Error::other("injected partial write failure"))
-+        });
-+        assert!(format!("{:#}", result.unwrap_err()).contains("injected partial write failure"));
-+        assert_eq!(fs::read(&document.sidecar).unwrap(), old);
-+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 3);
-+        drop(document);
-+        let (_document, loaded) = Document::open(&path).unwrap();
-+        assert_comments(&loaded, &comments);
-+    }
-+
-+    #[test]
-+    fn malformed_wrong_schema_wrong_document_and_incomplete_comments_are_refused() {
-+        let dir = tempfile::tempdir().unwrap();
-+        let path = original(dir.path());
-+        let sidecar = append_suffix(&path, ".reviewr.json");
-+        let valid = serde_json::json!({
-+            "schema_version": 1,
-+            "document": path.canonicalize().unwrap(),
-+            "comments": []
-+        });
-+        let mut wrong_schema = valid.clone();
-+        wrong_schema["schema_version"] = 2.into();
-+        let mut wrong_document = valid.clone();
-+        wrong_document["document"] = dir.path().join("other.md").to_str().unwrap().into();
-+        let mut missing_field = valid.clone();
-+        let mut comment = serde_json::to_value(comments(&path).get(0).unwrap()).unwrap();
-+        comment.as_object_mut().unwrap().remove("diff_anchored");
-+        missing_field["comments"] = serde_json::json!([comment]);
-+        let mut unknown_field = valid.clone();
-+        unknown_field["history"] = serde_json::json!([]);
-+        for bytes in [
-+            b"{bad json".to_vec(),
-+            serde_json::to_vec(&wrong_schema).unwrap(),
-+            serde_json::to_vec(&wrong_document).unwrap(),
-+            serde_json::to_vec(&missing_field).unwrap(),
-+            serde_json::to_vec(&unknown_field).unwrap(),
-+        ] {
-+            fs::write(&sidecar, &bytes).unwrap();
-+            assert!(Document::open(&path).is_err());
-+            assert_eq!(fs::read(&sidecar).unwrap(), bytes);
++        /// Both anchor types, both sides, and verbatim multiline/Unicode field content.
++        fn comments(path: &Path) -> CommentStore {
++            let file = path.canonicalize().unwrap().to_str().unwrap().to_owned();
++            let mut comments = CommentStore::new();
++            comments.add(Comment {
++                file: file.clone(),
++                side: Side::Old,
++                start: 7,
++                end: 11,
++                lines: "-old\n context\n\tquoted \"text\"\n".into(),
++                text: "  multiline\n\nreview 🦀\0\r\n".into(),
++                diff_anchored: true,
++            });
++            comments.add(Comment {
++                file,
++                side: Side::New,
++                start: 20,
++                end: 20,
++                lines: " plain content\n".into(),
++                text: String::new(),
++                diff_anchored: false,
++            });
++            comments
 +        }
-+        fs::write(&sidecar, serde_json::to_vec(&valid).unwrap()).unwrap();
-+        assert!(Document::open(&path).is_ok(), "failed open must release its lock");
-+    }
 +
-+    #[test]
-+    fn foreign_comment_files_and_unusable_ranges_are_refused_on_open_and_save() {
-+        let dir = tempfile::tempdir().unwrap();
-+        let path = original(dir.path());
-+        let (document, _) = Document::open(&path).unwrap();
-+        let valid = comments(&path);
-+        document.save(&valid).unwrap();
-+        let old = fs::read(&document.sidecar).unwrap();
-+        let mut foreign = valid.get(0).unwrap().clone();
-+        foreign.file = "relative.md".into();
-+        let mut zero_start = valid.get(0).unwrap().clone();
-+        zero_start.start = 0;
-+        let mut reversed = valid.get(0).unwrap().clone();
-+        reversed.end = reversed.start - 1;
-+        let invalid_comments = [foreign, zero_start, reversed];
-+        for invalid in &invalid_comments {
-+            let mut store = CommentStore::new();
-+            store.add(invalid.clone());
-+            assert!(document.save(&store).is_err());
++        /// Compare all seven fields and insertion order, not just visible text.
++        fn assert_comments(actual: &CommentStore, expected: &CommentStore) {
++            assert_eq!(actual.iter().collect::<Vec<_>>(), expected.iter().collect::<Vec<_>>());
++        }
++
++        #[test]
++        fn roundtrip_all_fields_and_canonical_json_without_touching_original() {
++            let dir = tempfile::tempdir().unwrap();
++            let path = original(dir.path());
++            let original_bytes = fs::read(&path).unwrap();
++            let (document, loaded) = Document::open(&path).unwrap();
++            assert!(loaded.is_empty());
++            assert_eq!(document.path(), path.canonicalize().unwrap());
++            let comments = comments(&path);
++            document.save(&comments).unwrap();
++            let json: serde_json::Value =
++                serde_json::from_slice(&fs::read(&document.sidecar).unwrap()).unwrap();
++            assert_eq!(json.as_object().unwrap().len(), 3);
++            assert_eq!(json["schema_version"], 1);
++            assert_eq!(json["document"], document.path().to_str().unwrap());
++            assert_eq!(json["comments"][0].as_object().unwrap().len(), 7);
++            assert_eq!(json["comments"][0]["side"], "old");
++            assert_eq!(json["comments"][1]["side"], "new");
++            assert_eq!(document.sidecar, append_suffix(&path, ".reviewr.json"));
++            drop(document);
++            let (_document, loaded) = Document::open(&path).unwrap();
++            assert_comments(&loaded, &comments);
++            assert_eq!(fs::read(&path).unwrap(), original_bytes);
++        }
++
++        #[test]
++        fn empty_snapshot_reopens_empty() {
++            let dir = tempfile::tempdir().unwrap();
++            let path = original(dir.path());
++            let (document, comments) = Document::open(&path).unwrap();
++            assert!(!document.sidecar.exists());
++            document.save(&comments).unwrap();
++            drop(document);
++            let (_document, loaded) = Document::open(&path).unwrap();
++            assert!(loaded.is_empty());
++        }
++
++        #[test]
++        fn save_changed_clone_preserves_edits_and_deletions() {
++            let dir = tempfile::tempdir().unwrap();
++            let path = original(dir.path());
++            let (document, _) = Document::open(&path).unwrap();
++            let comments = comments(&path);
++            document.save(&comments).unwrap();
++            let mut changed = comments.clone();
++            assert!(changed.edit(0, "edited\nverbatim  ".into()));
++            assert!(changed.take(1).is_some());
++            assert_eq!(comments.len(), 2);
++            assert_ne!(comments.get(0).unwrap().text, changed.get(0).unwrap().text);
++            document.save(&changed).unwrap();
++            drop(document);
++            let (document, loaded) = Document::open(&path).unwrap();
++            assert_comments(&loaded, &changed);
++            let mut cleared = loaded.clone();
++            cleared.take_all();
++            document.save(&cleared).unwrap();
++            drop(document);
++            let (_document, loaded) = Document::open(&path).unwrap();
++            assert!(loaded.is_empty());
++        }
++
++        #[test]
++        fn partial_write_failure_preserves_old_json_and_cleans_temporary() {
++            let dir = tempfile::tempdir().unwrap();
++            let path = original(dir.path());
++            let (document, _) = Document::open(&path).unwrap();
++            let comments = comments(&path);
++            document.save(&comments).unwrap();
++            let old = fs::read(&document.sidecar).unwrap();
++            let result = document.save_with(&CommentStore::new(), |file, bytes| {
++                file.write_all(&bytes[..bytes.len() / 2])?;
++                Err(io::Error::other("injected partial write failure"))
++            });
++            assert!(
++                format!("{:#}", result.unwrap_err()).contains("injected partial write failure")
++            );
 +            assert_eq!(fs::read(&document.sidecar).unwrap(), old);
++            assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 3);
++            drop(document);
++            let (_document, loaded) = Document::open(&path).unwrap();
++            assert_comments(&loaded, &comments);
 +        }
-+        let sidecar = document.sidecar.clone();
-+        drop(document);
-+        for invalid in invalid_comments {
-+            let snapshot = Snapshot {
-+                schema_version: SCHEMA_VERSION,
-+                document: path.clone(),
-+                comments: vec![invalid],
-+            };
-+            let bytes = serde_json::to_vec(&snapshot).unwrap();
++
++        #[test]
++        fn malformed_wrong_schema_wrong_document_and_incomplete_comments_are_refused() {
++            let dir = tempfile::tempdir().unwrap();
++            let path = original(dir.path());
++            let sidecar = append_suffix(&path, ".reviewr.json");
++            let valid = serde_json::json!({
++                "schema_version": 1,
++                "document": path.canonicalize().unwrap(),
++                "comments": []
++            });
++            let mut wrong_schema = valid.clone();
++            wrong_schema["schema_version"] = 2.into();
++            let mut wrong_document = valid.clone();
++            wrong_document["document"] = dir.path().join("other.md").to_str().unwrap().into();
++            let mut missing_field = valid.clone();
++            let mut comment = serde_json::to_value(comments(&path).get(0).unwrap()).unwrap();
++            comment.as_object_mut().unwrap().remove("diff_anchored");
++            missing_field["comments"] = serde_json::json!([comment]);
++            let mut unknown_field = valid.clone();
++            unknown_field["history"] = serde_json::json!([]);
++            for bytes in [
++                b"{bad json".to_vec(),
++                serde_json::to_vec(&wrong_schema).unwrap(),
++                serde_json::to_vec(&wrong_document).unwrap(),
++                serde_json::to_vec(&missing_field).unwrap(),
++                serde_json::to_vec(&unknown_field).unwrap(),
++            ] {
++                fs::write(&sidecar, &bytes).unwrap();
++                assert!(Document::open(&path).is_err());
++                assert_eq!(fs::read(&sidecar).unwrap(), bytes);
++            }
++            fs::write(&sidecar, serde_json::to_vec(&valid).unwrap()).unwrap();
++            assert!(Document::open(&path).is_ok(), "failed open must release its lock");
++        }
++
++        #[test]
++        fn foreign_comment_files_and_unusable_ranges_are_refused_on_open_and_save() {
++            let dir = tempfile::tempdir().unwrap();
++            let path = original(dir.path());
++            let (document, _) = Document::open(&path).unwrap();
++            let valid = comments(&path);
++            document.save(&valid).unwrap();
++            let old = fs::read(&document.sidecar).unwrap();
++            let mut foreign = valid.get(0).unwrap().clone();
++            foreign.file = "relative.md".into();
++            let mut zero_start = valid.get(0).unwrap().clone();
++            zero_start.start = 0;
++            let mut reversed = valid.get(0).unwrap().clone();
++            reversed.end = reversed.start - 1;
++            let invalid_comments = [foreign, zero_start, reversed];
++            for invalid in &invalid_comments {
++                let mut store = CommentStore::new();
++                store.add(invalid.clone());
++                assert!(document.save(&store).is_err());
++                assert_eq!(fs::read(&document.sidecar).unwrap(), old);
++            }
++            let sidecar = document.sidecar.clone();
++            drop(document);
++            for invalid in invalid_comments {
++                let snapshot = Snapshot {
++                    schema_version: SCHEMA_VERSION,
++                    document: path.clone(),
++                    comments: vec![invalid],
++                };
++                let bytes = serde_json::to_vec(&snapshot).unwrap();
++                fs::write(&sidecar, &bytes).unwrap();
++                assert!(Document::open(&path).is_err());
++                assert_eq!(fs::read(&sidecar).unwrap(), bytes);
++            }
++            fs::write(&sidecar, &old).unwrap();
++            let (_document, loaded) = Document::open(&path).unwrap();
++            assert_comments(&loaded, &valid);
++        }
++
++        #[test]
++        fn noncanonical_document_spelling_is_refused() {
++            let dir = tempfile::tempdir().unwrap();
++            let path = original(dir.path());
++            let sidecar = append_suffix(&path, ".reviewr.json");
++            let aliased = format!(
++                "{}/./{}",
++                path.parent().unwrap().display(),
++                path.file_name().unwrap().to_str().unwrap()
++            );
++            // Path equality alone normalizes dot components, but the snapshot contract
++            // requires exactly the canonical spelling, not an equivalent alias.
++            assert_eq!(Path::new(&aliased), path);
++            let bytes = serde_json::to_vec(&serde_json::json!({
++                "schema_version": 1, "document": aliased, "comments": []
++            }))
++            .unwrap();
 +            fs::write(&sidecar, &bytes).unwrap();
 +            assert!(Document::open(&path).is_err());
 +            assert_eq!(fs::read(&sidecar).unwrap(), bytes);
 +        }
-+        fs::write(&sidecar, &old).unwrap();
-+        let (_document, loaded) = Document::open(&path).unwrap();
-+        assert_comments(&loaded, &valid);
-+    }
 +
-+    #[test]
-+    fn noncanonical_document_spelling_is_refused() {
-+        let dir = tempfile::tempdir().unwrap();
-+        let path = original(dir.path());
-+        let sidecar = append_suffix(&path, ".reviewr.json");
-+        let aliased = format!(
-+            "{}/./{}",
-+            path.parent().unwrap().display(),
-+            path.file_name().unwrap().to_str().unwrap()
-+        );
-+        // Path equality alone normalizes dot components, but the snapshot contract
-+        // requires exactly the canonical spelling, not an equivalent alias.
-+        assert_eq!(Path::new(&aliased), path);
-+        let bytes = serde_json::to_vec(&serde_json::json!({
-+            "schema_version": 1, "document": aliased, "comments": []
-+        }))
-+        .unwrap();
-+        fs::write(&sidecar, &bytes).unwrap();
-+        assert!(Document::open(&path).is_err());
-+        assert_eq!(fs::read(&sidecar).unwrap(), bytes);
-+    }
-+
-+    #[test]
-+    fn save_refuses_externally_replaced_invalid_snapshot() {
-+        let dir = tempfile::tempdir().unwrap();
-+        let path = original(dir.path());
-+        let (document, _) = Document::open(&path).unwrap();
-+        document.save(&comments(&path)).unwrap();
-+        fs::write(&document.sidecar, b"malformed external edit").unwrap();
-+        assert!(document.save(&CommentStore::new()).is_err());
-+        assert_eq!(fs::read(&document.sidecar).unwrap(), b"malformed external edit");
-+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 3);
-+    }
-+
-+    #[test]
-+    fn lock_refuses_second_writer_then_reopens_after_drop() {
-+        let dir = tempfile::tempdir().unwrap();
-+        let path = original(dir.path());
-+        let (document, _) = Document::open(&path).unwrap();
-+        let lock = append_suffix(&document.sidecar, ".lock");
-+        fs::write(&lock, b"keep lock contents").unwrap();
-+        assert!(Document::open(&path).is_err());
-+        assert_eq!(fs::read(&lock).unwrap(), b"keep lock contents");
-+        drop(document);
-+        let (_document, _) = Document::open(&path).unwrap();
-+        assert_eq!(fs::read(&lock).unwrap(), b"keep lock contents");
-+    }
-+
-+    #[test]
-+    fn absent_original_and_directory_are_refused() {
-+        let dir = tempfile::tempdir().unwrap();
-+        assert!(Document::open(&dir.path().join("absent.md")).is_err());
-+        assert!(Document::open(dir.path()).is_err());
-+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
-+    }
-+
-+    #[cfg(unix)]
-+    #[test]
-+    fn original_symlink_uses_canonical_sidecar_and_same_lock() {
-+        use std::os::unix::fs::symlink;
-+        let dir = tempfile::tempdir().unwrap();
-+        let path = original(dir.path());
-+        let alias = dir.path().join("alias.md");
-+        symlink(&path, &alias).unwrap();
-+        let (document, _) = Document::open(&alias).unwrap();
-+        assert_eq!(document.path(), path.canonicalize().unwrap());
-+        assert!(Document::open(&path).is_err());
-+        document.save(&comments(&path)).unwrap();
-+        assert!(!append_suffix(&alias, ".reviewr.json").exists());
-+        drop(document);
-+        let (_document, loaded) = Document::open(&path).unwrap();
-+        assert_comments(&loaded, &comments(&path));
-+        assert!(fs::symlink_metadata(&alias).unwrap().file_type().is_symlink());
-+    }
-+
-+    #[cfg(unix)]
-+    #[test]
-+    fn sidecar_and_lock_symlinks_are_never_overwritten() {
-+        use std::os::unix::fs::symlink;
-+        let dir = tempfile::tempdir().unwrap();
-+        let path = original(dir.path());
-+        let sidecar = append_suffix(&path, ".reviewr.json");
-+        let lock = append_suffix(&sidecar, ".lock");
-+        let target = dir.path().join("untouched");
-+        fs::write(&target, b"do not overwrite").unwrap();
-+        symlink(&target, &sidecar).unwrap();
-+        assert!(Document::open(&path).is_err());
-+        assert!(fs::symlink_metadata(&sidecar).unwrap().file_type().is_symlink());
-+        fs::remove_file(&sidecar).unwrap();
-+        fs::remove_file(&lock).unwrap();
-+        symlink(&target, &lock).unwrap();
-+        assert!(Document::open(&path).is_err());
-+        assert!(fs::symlink_metadata(&lock).unwrap().file_type().is_symlink());
-+        fs::remove_file(&lock).unwrap();
-+        let (document, _) = Document::open(&path).unwrap();
-+        symlink(&target, &sidecar).unwrap();
-+        assert!(document.save(&comments(&path)).is_err());
-+        assert!(fs::symlink_metadata(&sidecar).unwrap().file_type().is_symlink());
-+        assert_eq!(fs::read(&target).unwrap(), b"do not overwrite");
-+        fs::remove_file(&sidecar).unwrap();
-+        symlink(dir.path().join("missing-target"), &sidecar).unwrap();
-+        assert!(document.save(&comments(&path)).is_err(), "dangling symlinks must also be refused");
-+        assert!(!dir.path().join("missing-target").exists());
-+    }
-+
-+    #[cfg(unix)]
-+    #[test]
-+    fn non_utf8_original_is_refused_without_creating_sidecars() {
-+        use std::os::unix::ffi::OsStringExt;
-+        let dir = tempfile::tempdir().unwrap();
-+        let path = dir.path().join(std::ffi::OsString::from_vec(b"invalid-\xff.md".to_vec()));
-+        fs::write(&path, b"original").unwrap();
-+        assert!(Document::open(&path).is_err());
-+        assert_eq!(fs::read(&path).unwrap(), b"original");
-+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
-+    }
-+
-+    #[cfg(unix)]
-+    #[test]
-+    fn private_snapshot_and_lock_permissions() {
-+        use std::os::unix::fs::PermissionsExt;
-+        let dir = tempfile::tempdir().unwrap();
-+        let path = original(dir.path());
-+        let (document, _) = Document::open(&path).unwrap();
-+        document.save(&comments(&path)).unwrap();
-+        for private in [&document.sidecar, &append_suffix(&document.sidecar, ".lock")] {
-+            assert_eq!(fs::metadata(private).unwrap().permissions().mode() & 0o777, 0o600);
++        #[test]
++        fn save_refuses_externally_replaced_invalid_snapshot() {
++            let dir = tempfile::tempdir().unwrap();
++            let path = original(dir.path());
++            let (document, _) = Document::open(&path).unwrap();
++            document.save(&comments(&path)).unwrap();
++            fs::write(&document.sidecar, b"malformed external edit").unwrap();
++            assert!(document.save(&CommentStore::new()).is_err());
++            assert_eq!(fs::read(&document.sidecar).unwrap(), b"malformed external edit");
++            assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 3);
 +        }
++
++        #[test]
++        fn lock_refuses_second_writer_then_reopens_after_drop() {
++            let dir = tempfile::tempdir().unwrap();
++            let path = original(dir.path());
++            let (document, _) = Document::open(&path).unwrap();
++            let lock = append_suffix(&document.sidecar, ".lock");
++            fs::write(&lock, b"keep lock contents").unwrap();
++            assert!(Document::open(&path).is_err());
++            assert_eq!(fs::read(&lock).unwrap(), b"keep lock contents");
++            drop(document);
++            let (_document, _) = Document::open(&path).unwrap();
++            assert_eq!(fs::read(&lock).unwrap(), b"keep lock contents");
++        }
++
++        #[test]
++        fn drop_releases_lease_with_duplicate_descriptor_without_unlocking_next_writer() {
++            let dir = tempfile::tempdir().unwrap();
++            let path = original(dir.path());
++            let (document, _) = Document::open(&path).unwrap();
++            let saved = comments(&path);
++            document.save(&saved).unwrap();
++            let lock_path = append_suffix(&document.sidecar, ".lock");
++            fs::write(&lock_path, b"persistent lock contents").unwrap();
++            let identity = rfs::fstat(&document.lock).unwrap();
++            // A safe duplicate retains the same open file description, just like
++            // a child between fork and exec despite the descriptor's CLOEXEC flag.
++            let inherited = document.lock.try_clone().unwrap();
++            let contender = File::open(&lock_path).unwrap();
++            for _ in 0..2 {
++                assert!(Document::open(&path).is_err());
++                assert!(contender.try_lock().is_err(), "failed open cannot unlock the writer");
++            }
++            drop(document);
++            let (next_writer, loaded) = Document::open(&path)
++                .expect("drop must release the lease even while a duplicate remains open");
++            assert_comments(&loaded, &saved);
++            assert!(same_inode(&identity, &rfs::fstat(&next_writer.lock).unwrap()));
++            assert_eq!(fs::read(&lock_path).unwrap(), b"persistent lock contents");
++            assert!(Document::open(&path).is_err());
++            assert!(contender.try_lock().is_err());
++            drop(inherited);
++            assert!(Document::open(&path).is_err(), "old duplicate cannot unlock next writer");
++            assert!(contender.try_lock().is_err());
++            drop(next_writer);
++            let (_, loaded) = Document::open(&path).unwrap();
++            assert_comments(&loaded, &saved);
++            assert_eq!(fs::read(&lock_path).unwrap(), b"persistent lock contents");
++        }
++
++        #[test]
++        fn absent_original_and_directory_are_refused() {
++            let dir = tempfile::tempdir().unwrap();
++            assert!(Document::open(&dir.path().join("absent.md")).is_err());
++            assert!(Document::open(dir.path()).is_err());
++            assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
++        }
++
++        #[cfg(unix)]
++        #[test]
++        fn original_symlink_uses_canonical_sidecar_and_same_lock() {
++            use std::os::unix::fs::symlink;
++            let dir = tempfile::tempdir().unwrap();
++            let path = original(dir.path());
++            let alias = dir.path().join("alias.md");
++            symlink(&path, &alias).unwrap();
++            let (document, _) = Document::open(&alias).unwrap();
++            assert_eq!(document.path(), path.canonicalize().unwrap());
++            assert!(Document::open(&path).is_err());
++            document.save(&comments(&path)).unwrap();
++            assert!(!append_suffix(&alias, ".reviewr.json").exists());
++            drop(document);
++            let (_document, loaded) = Document::open(&path).unwrap();
++            assert_comments(&loaded, &comments(&path));
++            assert!(fs::symlink_metadata(&alias).unwrap().file_type().is_symlink());
++        }
++
++        #[cfg(unix)]
++        #[test]
++        fn sidecar_and_lock_symlinks_are_never_overwritten() {
++            use std::os::unix::fs::symlink;
++            let dir = tempfile::tempdir().unwrap();
++            let path = original(dir.path());
++            let sidecar = append_suffix(&path, ".reviewr.json");
++            let lock = append_suffix(&sidecar, ".lock");
++            let target = dir.path().join("untouched");
++            fs::write(&target, b"do not overwrite").unwrap();
++            symlink(&target, &sidecar).unwrap();
++            assert!(Document::open(&path).is_err());
++            assert!(fs::symlink_metadata(&sidecar).unwrap().file_type().is_symlink());
++            fs::remove_file(&sidecar).unwrap();
++            fs::remove_file(&lock).unwrap();
++            symlink(&target, &lock).unwrap();
++            assert!(Document::open(&path).is_err());
++            assert!(fs::symlink_metadata(&lock).unwrap().file_type().is_symlink());
++            fs::remove_file(&lock).unwrap();
++            let (document, _) = Document::open(&path).unwrap();
++            symlink(&target, &sidecar).unwrap();
++            assert!(document.save(&comments(&path)).is_err());
++            assert!(fs::symlink_metadata(&sidecar).unwrap().file_type().is_symlink());
++            assert_eq!(fs::read(&target).unwrap(), b"do not overwrite");
++            fs::remove_file(&sidecar).unwrap();
++            symlink(dir.path().join("missing-target"), &sidecar).unwrap();
++            assert!(
++                document.save(&comments(&path)).is_err(),
++                "dangling symlinks must also be refused"
++            );
++            assert!(!dir.path().join("missing-target").exists());
++        }
++
++        #[cfg(unix)]
++        #[test]
++        fn non_utf8_original_is_refused_without_creating_sidecars() {
++            use std::os::unix::ffi::OsStringExt;
++            let dir = tempfile::tempdir().unwrap();
++            let path = dir.path().join(std::ffi::OsString::from_vec(b"invalid-\xff.md".to_vec()));
++            fs::write(&path, b"original").unwrap();
++            assert!(Document::open(&path).is_err());
++            assert_eq!(fs::read(&path).unwrap(), b"original");
++            assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
++        }
++
++        #[test]
++        fn moved_parent_replacements_refuse_save_preserving_draft_and_lock() {
++            use std::os::unix::fs::{MetadataExt, symlink};
++
++            // The symlink variant is the reported exploit; a real replacement
++            // directory additionally proves we compare dev/ino, not just spelling.
++            for replace_with_symlink in [true, false] {
++                let root = tempfile::tempdir().unwrap();
++                let parent = root.path().join("current");
++                let moved = root.path().join("moved");
++                let other = root.path().join("other");
++                fs::create_dir(&parent).unwrap();
++                fs::create_dir(&other).unwrap();
++                let path = original(&parent);
++                let (document, _) = Document::open(&path).unwrap();
++                let saved = comments(&path);
++                document.save(&saved).unwrap();
++                let old = fs::read(&document.sidecar).unwrap();
++                let lock_path = append_suffix(&document.sidecar, ".lock");
++                let old_lock = fs::metadata(&lock_path).unwrap();
++                let mut draft = saved.clone();
++                assert!(draft.edit(0, "unsaved draft\nverbatim  ".into()));
++                let expected_draft = draft.clone();
++
++                fs::rename(&parent, &moved).unwrap();
++                let replacement = if replace_with_symlink {
++                    symlink(&other, &parent).unwrap();
++                    other.clone()
++                } else {
++                    fs::create_dir(&parent).unwrap();
++                    parent.clone()
++                };
++                let replacement_original = replacement.join(path.file_name().unwrap());
++                fs::write(&replacement_original, b"unrelated replacement document").unwrap();
++                // The writable replacement has the SAME document basename and no
++                // sidecar. Pathname-based saving would succeed here, not ENOTDIR.
++                assert!(document.save(&draft).is_err());
++                assert_comments(&draft, &expected_draft);
++                assert_eq!(
++                    fs::read(moved.join(document.sidecar.file_name().unwrap())).unwrap(),
++                    old
++                );
++                assert_eq!(
++                    fs::read(moved.join(path.file_name().unwrap())).unwrap(),
++                    b"original body\n"
++                );
++                assert_eq!(
++                    fs::read(&replacement_original).unwrap(),
++                    b"unrelated replacement document"
++                );
++                assert_eq!(
++                    fs::read_dir(&replacement).unwrap().count(),
++                    1,
++                    "no new lock, temp, or JSON"
++                );
++                assert_eq!(fs::read_dir(&moved).unwrap().count(), 3);
++                let held_lock = File::open(moved.join(lock_path.file_name().unwrap())).unwrap();
++                assert_eq!(held_lock.metadata().unwrap().dev(), old_lock.dev());
++                assert_eq!(held_lock.metadata().unwrap().ino(), old_lock.ino());
++                assert!(held_lock.try_lock().is_err(), "same lock inode remains held");
++                let error = Document::open(&moved.join(path.file_name().unwrap())).unwrap_err();
++                assert!(format!("{error:#}").contains("already locked"));
++
++                drop(document);
++                assert_eq!(fs::read_dir(&replacement).unwrap().count(), 1);
++                held_lock.try_lock().unwrap();
++                // This independent probe also owns a lease that forks can retain.
++                held_lock.unlock().unwrap();
++                drop(held_lock);
++                if replace_with_symlink {
++                    fs::remove_file(&parent).unwrap();
++                } else {
++                    fs::remove_dir_all(&parent).unwrap();
++                }
++                fs::rename(&moved, &parent).unwrap();
++                let (document, loaded) = Document::open(&path).unwrap();
++                assert_comments(&loaded, &saved);
++                document.save(&draft).unwrap();
++                drop(document);
++                let (_, loaded) = Document::open(&path).unwrap();
++                assert_comments(&loaded, &expected_draft);
++            }
++        }
++
++        #[test]
++        fn parent_swap_during_write_cancels_bound_temp_without_touching_replacement() {
++            use std::os::unix::fs::{MetadataExt, symlink};
++
++            // Both a completed write followed by failed precommit validation and
++            // an injected partial-I/O failure must clean up using the original fd.
++            for fail_write in [false, true] {
++                let root = tempfile::tempdir().unwrap();
++                let parent = root.path().join("current");
++                let moved = root.path().join("moved");
++                let other = root.path().join("other");
++                fs::create_dir(&parent).unwrap();
++                fs::create_dir(&other).unwrap();
++                let path = original(&parent);
++                let (document, _) = Document::open(&path).unwrap();
++                let saved = comments(&path);
++                document.save(&saved).unwrap();
++                let old = fs::read(&document.sidecar).unwrap();
++                let mut draft = saved.clone();
++                draft.edit(0, "keep this failed draft".into());
++                let expected_draft = draft.clone();
++                let replacement_original = other.join(path.file_name().unwrap());
++                fs::write(&replacement_original, b"replacement original").unwrap();
++                let mut sentinel = None;
++
++                let result = document.save_with(&draft, |file, bytes| {
++                    // This deterministic hook runs after validation/temp creation
++                    // but BEFORE writing, so pathname cleanup would hit other/.
++                    fs::rename(&parent, &moved)?;
++                    symlink(&other, &parent)?;
++                    let temp = fs::read_dir(&moved)?
++                        .map(|entry| entry.unwrap().path())
++                        .find(|path| path.file_name().unwrap().to_string_lossy().contains(".tmp."))
++                        .unwrap();
++                    let replacement_temp = other.join(temp.file_name().unwrap());
++                    fs::write(&replacement_temp, b"do not remove replacement temp")?;
++                    sentinel = Some(replacement_temp);
++                    let written = if fail_write { &bytes[..bytes.len() / 2] } else { bytes };
++                    file.write_all(written)?;
++                    assert_eq!(file.metadata()?.ino(), fs::metadata(&temp)?.ino());
++                    assert_eq!(
++                        fs::read(&temp)?,
++                        written,
++                        "writes stay in moved original directory"
++                    );
++                    if fail_write {
++                        Err(io::Error::other("injected failure after ancestor swap"))
++                    } else {
++                        Ok(())
++                    }
++                });
++                let error = format!("{:#}", result.unwrap_err());
++                assert!(error.contains(if fail_write {
++                    "injected failure"
++                } else {
++                    "parent path changed"
++                }));
++                assert_comments(&draft, &expected_draft);
++                assert_eq!(
++                    fs::read(moved.join(document.sidecar.file_name().unwrap())).unwrap(),
++                    old
++                );
++                assert_eq!(fs::read_dir(&moved).unwrap().count(), 3, "bound temp was cancelled");
++                assert_eq!(fs::read_dir(&other).unwrap().count(), 2, "no new lock or snapshot");
++                let sentinel = sentinel.unwrap();
++                assert_eq!(fs::read(&sentinel).unwrap(), b"do not remove replacement temp");
++                assert_eq!(fs::read(&replacement_original).unwrap(), b"replacement original");
++                let lock = File::open(
++                    moved.join(append_suffix(&document.sidecar, ".lock").file_name().unwrap()),
++                )
++                .unwrap();
++                assert_eq!(lock.metadata().unwrap().ino(), document.lock.metadata().unwrap().ino());
++                assert!(lock.try_lock().is_err());
++                drop(document);
++                assert_eq!(fs::read(&sentinel).unwrap(), b"do not remove replacement temp");
++                assert_eq!(fs::read_dir(&other).unwrap().count(), 2);
++                lock.try_lock().unwrap();
++            }
++        }
++
++        #[test]
++        fn nested_ancestor_symlink_swap_is_refused() {
++            use std::os::unix::fs::symlink;
++            let root = tempfile::tempdir().unwrap();
++            let ancestor = root.path().join("ancestor");
++            let parent = ancestor.join("nested");
++            let moved = root.path().join("moved");
++            let replacement = root.path().join("replacement");
++            fs::create_dir_all(&parent).unwrap();
++            fs::create_dir_all(replacement.join("nested")).unwrap();
++            let path = original(&parent);
++            let (document, _) = Document::open(&path).unwrap();
++            let saved = comments(&path);
++            document.save(&saved).unwrap();
++            let old = fs::read(&document.sidecar).unwrap();
++            fs::rename(&ancestor, &moved).unwrap();
++            symlink(&replacement, &ancestor).unwrap();
++            let replacement_original = replacement.join("nested").join(path.file_name().unwrap());
++            fs::write(&replacement_original, b"unrelated file").unwrap();
++            assert!(document.save(&CommentStore::new()).is_err());
++            assert_eq!(
++                fs::read(moved.join("nested").join(document.sidecar.file_name().unwrap())).unwrap(),
++                old
++            );
++            assert_eq!(fs::read_dir(replacement.join("nested")).unwrap().count(), 1);
++            assert_eq!(fs::read(&replacement_original).unwrap(), b"unrelated file");
++        }
++
++        #[test]
++        fn bound_creation_reads_rename_and_drop_do_not_follow_moved_parent() {
++            use std::os::unix::fs::symlink;
++            let root = tempfile::tempdir().unwrap();
++            let parent = root.path().join("current");
++            let moved = root.path().join("moved");
++            let replacement = root.path().join("replacement");
++            fs::create_dir(&parent).unwrap();
++            fs::create_dir(&replacement).unwrap();
++            let path = original(&parent);
++            let (document, _) = Document::open(&path).unwrap();
++            let saved = comments(&path);
++            document.save(&saved).unwrap();
++            let old = fs::read(&document.sidecar).unwrap();
++            fs::rename(&parent, &moved).unwrap();
++            symlink(&replacement, &parent).unwrap();
++            // These are primitive probes for a swap after the last pathname
++            // validation: all remaining operations must still use the held fd.
++            let lock =
++                open_lock(&document.directory, &append_suffix(&document.sidecar, ".lock")).unwrap();
++            assert!(lock.try_lock().is_err());
++            let loaded =
++                read_snapshot(&document.directory, &document.sidecar, &path).unwrap().unwrap();
++            assert_eq!(loaded.comments, saved.iter().cloned().collect::<Vec<_>>());
++            let mut temp = PendingSnapshot::create(&document.directory, &document.sidecar).unwrap();
++            temp.file.as_mut().unwrap().write_all(&old).unwrap();
++            temp.file.as_ref().unwrap().sync_all().unwrap();
++            assert!(moved.join(temp.path.file_name().unwrap()).is_file());
++            assert_eq!(fs::read_dir(&replacement).unwrap().count(), 0);
++            rfs::renameat(
++                &temp.directory,
++                entry_name(&temp.path).unwrap(),
++                &document.directory,
++                entry_name(&document.sidecar).unwrap(),
++            )
++            .unwrap();
++            temp.committed = true;
++            drop(temp);
++            assert_eq!(fs::read(moved.join(document.sidecar.file_name().unwrap())).unwrap(), old);
++            let temp = PendingSnapshot::create(&document.directory, &document.sidecar).unwrap();
++            let basename = temp.path.file_name().unwrap().to_owned();
++            fs::write(replacement.join(&basename), b"replacement sentinel").unwrap();
++            drop(temp);
++            assert!(!moved.join(&basename).exists());
++            assert_eq!(fs::read(replacement.join(&basename)).unwrap(), b"replacement sentinel");
++            assert_eq!(fs::read_dir(&moved).unwrap().count(), 3);
++            assert_eq!(fs::read_dir(&replacement).unwrap().count(), 1);
++        }
++
++        #[test]
++        fn atomic_original_replacement_in_same_parent_is_allowed() {
++            use std::os::unix::fs::MetadataExt;
++            let dir = tempfile::tempdir().unwrap();
++            let path = original(dir.path());
++            let (document, _) = Document::open(&path).unwrap();
++            let saved = comments(&path);
++            document.save(&saved).unwrap();
++            let lock_inode = document.lock.metadata().unwrap().ino();
++            let original_inode = fs::metadata(&path).unwrap().ino();
++            let replacement = dir.path().join("atomic-editor-save.tmp");
++            fs::write(&replacement, b"atomically edited original\n").unwrap();
++            fs::rename(&replacement, &path).unwrap();
++            assert_ne!(fs::metadata(&path).unwrap().ino(), original_inode);
++            let mut draft = saved.clone();
++            draft.edit(0, "comments after editor save".into());
++            draft.take(1);
++            document.save(&draft).unwrap();
++            assert_eq!(document.lock.metadata().unwrap().ino(), lock_inode);
++            assert!(Document::open(&path).is_err());
++            assert_eq!(fs::read(&path).unwrap(), b"atomically edited original\n");
++            drop(document);
++            let (_, loaded) = Document::open(&path).unwrap();
++            assert_comments(&loaded, &draft);
++        }
++
++        #[test]
++        fn removed_nonregular_or_symlink_original_refuses_save() {
++            use std::os::unix::fs::symlink;
++            let dir = tempfile::tempdir().unwrap();
++            let path = original(dir.path());
++            let (document, _) = Document::open(&path).unwrap();
++            let saved = comments(&path);
++            document.save(&saved).unwrap();
++            let old = fs::read(&document.sidecar).unwrap();
++            fs::remove_file(&path).unwrap();
++            assert!(document.save(&CommentStore::new()).is_err());
++            fs::create_dir(&path).unwrap();
++            assert!(document.save(&CommentStore::new()).is_err());
++            fs::remove_dir(&path).unwrap();
++            let target = dir.path().join("untouched-original");
++            fs::write(&target, b"do not modify").unwrap();
++            symlink(&target, &path).unwrap();
++            assert!(document.save(&CommentStore::new()).is_err());
++            assert_eq!(fs::read(&target).unwrap(), b"do not modify");
++            assert_eq!(fs::read(&document.sidecar).unwrap(), old);
++            assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 4);
++        }
++
++        #[test]
++        fn replaced_lock_is_refused_without_releasing_original_inode() {
++            let dir = tempfile::tempdir().unwrap();
++            let path = original(dir.path());
++            let (document, _) = Document::open(&path).unwrap();
++            document.save(&comments(&path)).unwrap();
++            let old = fs::read(&document.sidecar).unwrap();
++            let lock = append_suffix(&document.sidecar, ".lock");
++            let held_path = dir.path().join("held-lock");
++            fs::rename(&lock, &held_path).unwrap();
++            fs::write(&lock, b"replacement lock").unwrap();
++            assert!(document.save(&CommentStore::new()).is_err());
++            assert_eq!(fs::read(&document.sidecar).unwrap(), old);
++            assert_eq!(fs::read(&lock).unwrap(), b"replacement lock");
++            let inherited = document.lock.try_clone().unwrap();
++            let original_lock = File::open(&held_path).unwrap();
++            assert!(original_lock.try_lock().is_err());
++            let (replacement_writer, loaded) = Document::open(&path).unwrap();
++            assert_comments(&loaded, &comments(&path));
++            assert!(!same_inode(
++                &rfs::fstat(&document.lock).unwrap(),
++                &rfs::fstat(&replacement_writer.lock).unwrap()
++            ));
++            drop(document);
++            original_lock.try_lock().unwrap();
++            original_lock.unlock().unwrap();
++            assert!(Document::open(&path).is_err(), "drop must not unlock the replacement writer");
++            drop(inherited);
++            assert!(Document::open(&path).is_err());
++            replacement_writer.save(&loaded).unwrap();
++            assert_eq!(fs::read(&lock).unwrap(), b"replacement lock");
++            drop(replacement_writer);
++            let (_, loaded) = Document::open(&path).unwrap();
++            assert_comments(&loaded, &comments(&path));
++        }
++
++        #[cfg(unix)]
++        #[test]
++        fn private_snapshot_and_lock_permissions() {
++            use std::os::unix::fs::PermissionsExt;
++            let dir = tempfile::tempdir().unwrap();
++            let path = original(dir.path());
++            let (document, _) = Document::open(&path).unwrap();
++            document.save(&comments(&path)).unwrap();
++            for private in [&document.sidecar, &append_suffix(&document.sidecar, ".lock")] {
++                assert_eq!(fs::metadata(private).unwrap().permissions().mode() & 0o777, 0o600);
++            }
++        }
++    }
++}
++
++/// Directory-bound document persistence is supported only on Unix platforms.
++/// Repository review mode does not depend on this implementation.
++#[cfg(not(unix))]
++#[derive(Debug)]
++pub struct Document {
++    path: std::path::PathBuf,
++}
++
++#[cfg(not(unix))]
++impl Document {
++    /// Refuse unsupported persistence before reading or creating any sidecar.
++    pub fn open(_path: &std::path::Path) -> anyhow::Result<(Self, crate::model::CommentStore)> {
++        anyhow::bail!("document mode requires Unix directory-relative filesystem operations")
++    }
++
++    /// Preserve the document API on platforms whose document mode is unavailable.
++    pub fn path(&self) -> &std::path::Path {
++        &self.path
++    }
++
++    /// Never fall back to unsafe pathname-based persistence on unsupported systems.
++    pub fn save(&self, _comments: &crate::model::CommentStore) -> anyhow::Result<()> {
++        anyhow::bail!("document mode requires Unix directory-relative filesystem operations")
 +    }
 +}
 diff --git a/src/keymap.rs b/src/keymap.rs

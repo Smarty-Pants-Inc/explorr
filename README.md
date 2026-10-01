@@ -74,8 +74,11 @@ focus it. Markdown links and links marked `?review=1` use the pinned, patched Re
 in [`reviewr/`](reviewr/README.md). A missing or failed Reviewr helper is an error, not an
 Explorr fallback: review comments must not be lost. Other files open in Explorr. Links accept
 `file://<local-host>/absolute/path#42` or explicit `?line=42&col=2` positions; encode the path
-as a URL. Linking the plugin or creating a workspace does **not** automatically create explorer
-sidebars.
+as a URL. Dedicated link editors do not consume or publish another editor's global open/debug
+panel state. Their text saves bind the original file and directory: a replaced file or parent
+is refused without discarding your edits. Automatic path-based format-on-save is disabled in
+these dedicated panes; ordinary project editors retain it. Linking the plugin or creating a
+workspace does **not** automatically create explorer sidebars.
 
 To explicitly open the explorer beside your current HerdR pane:
 
