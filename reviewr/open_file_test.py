@@ -124,6 +124,22 @@ class OpenFileTests(unittest.TestCase):
                 self.assertIn('HERDR_PANE_ID', result.stderr)
                 self.assertEqual(self.calls(), [])
 
+    def test_herdr_base32_pane_numbers_past_nine_are_real_panes(self):
+        # HerdR 0.9.1 encodes pane 10 as pA (alphabet 1-9, A-Z without I/L/O/U, then 0).
+        self.env.update(HERDR_PANE_ID='w1:pA',
+                        SPLIT_REPLY=json.dumps({'result': {'pane': {'pane_id': 'w1:pZ1'}}}))
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls()[0][3], 'w1:pA')
+        self.assertEqual(self.calls()[1][:3], ['pane', 'run', 'w1:pZ1'])
+        for origin in ['w1:pa', 'w1:pI', 'w1:pO', 'w1:pL', 'w1:pU']:
+            with self.subTest(origin=origin):
+                self.log.unlink(missing_ok=True)
+                self.env['HERDR_PANE_ID'] = origin
+                result = self.invoke()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.calls(), [])
+
     def test_stale_origin_has_no_fallback(self):
         self.env['FAIL_SPLIT'] = '1'
         result = self.invoke()

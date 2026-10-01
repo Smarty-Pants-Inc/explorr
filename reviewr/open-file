@@ -13,7 +13,9 @@ import sys
 
 
 # HerdR handles include a workspace prefix; aliases such as current are unsafe.
-PANE_ID = re.compile(r"w[A-Za-z0-9_-]+:p[0-9]+\Z")
+# Pane numbers use HerdR 0.9.1's public base-32 alphabet (workspace.rs
+# PUBLIC_ID_ALPHABET), so the tenth pane is p A, not p10: w1:pA.
+PANE_ID = re.compile(r"w[A-Za-z0-9_-]+:p[1-9A-HJKMNP-TV-Z0]+\Z")
 
 
 class LaunchError(Exception):
