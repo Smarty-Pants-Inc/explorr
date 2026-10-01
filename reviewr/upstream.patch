@@ -25,7 +25,7 @@ index 6add628..6013362 100644
  tempfile = "3"
  
 diff --git a/src/app.rs b/src/app.rs
-index 49829b8..4d75af4 100644
+index 49829b8..72cc54b 100644
 --- a/src/app.rs
 +++ b/src/app.rs
 @@ -8,7 +8,7 @@
@@ -307,7 +307,7 @@ index 49829b8..4d75af4 100644
              self.clamp_list_cursor();
              self.status = "comment deleted".to_string();
              // Don't strand the user in an empty "Comments (0)" overlay, matching `export`.
-@@ -2982,6 +3119,77 @@ impl App {
+@@ -2982,6 +3119,82 @@ impl App {
          }
      }
  
@@ -362,12 +362,17 @@ index 49829b8..4d75af4 100644
 +            if file != document.path() {
 +                bail!("original document target has changed");
 +            }
++            // Contract v2: bind the original's own identity too. A parent identity
++            // alone lets a same-parent symlink swap hand the editor a sibling file;
++            // a symlinked, missing, or non-regular original is refused right here.
 +            let parent_id = document.parent_id()?;
++            let file_id = document.file_id()?;
 +            let output = std::process::Command::new(helper)
 +                .arg(file)
 +                .arg(line.to_string())
 +                .arg("1")
 +                .arg(parent_id)
++                .arg(file_id)
 +                .output()
 +                .context("launching original editor")?;
 +            if !output.status.success() {
@@ -385,7 +390,7 @@ index 49829b8..4d75af4 100644
      // --- Search overlay (specs/search.md) ------------------------------------------------
  
      /// The active scope's annotation for `path` — the search overlay's file rows wear the
-@@ -2992,6 +3200,9 @@ impl App {
+@@ -2992,6 +3205,9 @@ impl App {
  
      /// `/`: open the search screen, from any tab, from either pane (specs/search.md).
      pub fn open_search(&mut self) {
@@ -395,7 +400,7 @@ index 49829b8..4d75af4 100644
          // A navigator-divider drag held from the review view must not become a search-split
          // resize: cancel it so its remaining drag events are consumed, not acted on — the
          // search divider only drags a gesture it started itself (specs/input.md).
-@@ -3275,6 +3486,9 @@ impl App {
+@@ -3275,6 +3491,9 @@ impl App {
      /// pick lands the cursor on its line, clamped into the file's current length. A
      /// vanished path opens nothing and the screen stays (specs/search.md).
      pub fn search_open_pick(&mut self) -> Result<()> {
@@ -405,7 +410,7 @@ index 49829b8..4d75af4 100644
          let Some(s) = self.search.as_ref() else { return Ok(()) };
          // Off `Ready`, the painted screen shows no rows — held results are stale and
          // invisible, so nothing opens (specs/search.md).
-@@ -3554,6 +3768,20 @@ impl App {
+@@ -3554,6 +3773,20 @@ impl App {
              out.push((A::MoveFile, Move));
              out.push((A::MovePage, Move));
          }
@@ -426,7 +431,7 @@ index 49829b8..4d75af4 100644
          out
      }
  
-@@ -3643,7 +3871,10 @@ impl App {
+@@ -3643,7 +3876,10 @@ impl App {
      /// `--base` flag (`specs/input.md` Base picker).
      #[must_use]
      pub fn base_pick_available(&self) -> bool {
@@ -438,7 +443,7 @@ index 49829b8..4d75af4 100644
      }
  
      /// Open the base picker: one row per branch name, the open PR's target starred first,
-@@ -3765,7 +3996,9 @@ impl App {
+@@ -3765,7 +4001,9 @@ impl App {
          logln!("export ({n}) -> {} ::\n{text}", target.label());
          let delivered = match target.export(&text) {
              Ok(()) => {
@@ -449,7 +454,7 @@ index 49829b8..4d75af4 100644
                  self.status = target.success_message(n);
                  logln!("export OK");
                  true
-@@ -3923,6 +4156,11 @@ fn hunk_row(rows: &[Row], from: Option<usize>, forward: bool) -> Option<usize> {
+@@ -3923,6 +4161,11 @@ fn hunk_row(rows: &[Row], from: Option<usize>, forward: bool) -> Option<usize> {
      }
  }
  
@@ -461,7 +466,7 @@ index 49829b8..4d75af4 100644
  /// Whether `path` names a markdown file: a `.md`/`.markdown` extension,
  /// case-insensitive (specs/diff-view.md).
  fn is_markdown_path(path: &str) -> bool {
-@@ -4166,6 +4404,545 @@ mod tests {
+@@ -4166,6 +4409,626 @@ mod tests {
          assert_eq!(recovered.focus, crate::Focus::Diff, "and focus lands on the read pane");
      }
  
@@ -822,9 +827,10 @@ index 49829b8..4d75af4 100644
 +        assert_eq!(
 +            args,
 +            format!(
-+                "{}\n2\n1\n{}\n",
++                "{}\n2\n1\n{}\n{}\n",
 +                canonical.display(),
-+                parent_id_of(canonical.parent().unwrap())
++                parent_id_of(canonical.parent().unwrap()),
++                file_id_of(&canonical)
 +            )
 +        );
 +        assert_eq!(app.status, "opened original in editor");
@@ -847,6 +853,14 @@ index 49829b8..4d75af4 100644
 +    fn parent_id_of(dir: &std::path::Path) -> String {
 +        use std::os::unix::fs::MetadataExt;
 +        let metadata = std::fs::metadata(dir).unwrap();
++        format!("{}:{}", metadata.dev(), metadata.ino())
++    }
++
++    /// The cross-language FILE_ID contract: unsigned decimal `DEV:INO` of the entry itself.
++    #[cfg(unix)]
++    fn file_id_of(path: &std::path::Path) -> String {
++        use std::os::unix::fs::MetadataExt;
++        let metadata = std::fs::symlink_metadata(path).unwrap();
 +        format!("{}:{}", metadata.dev(), metadata.ino())
 +    }
 +
@@ -970,8 +984,80 @@ index 49829b8..4d75af4 100644
 +        let canonical = path.canonicalize().unwrap();
 +        assert_eq!(
 +            std::fs::read_to_string(args).unwrap(),
-+            format!("{}\n1\n1\n{}\n", canonical.display(), parent_id_of(&parent))
++            format!(
++                "{}\n1\n1\n{}\n{}\n",
++                canonical.display(),
++                parent_id_of(&parent),
++                file_id_of(&canonical)
++            )
 +        );
++    }
++
++    /// Contract v2: the helper receives exactly FILE LINE 1 PARENT_ID FILE_ID, where
++    /// FILE is the unchanged canonical original and FILE_ID is that entry's own identity.
++    #[cfg(unix)]
++    #[test]
++    fn document_edit_original_passes_exact_parent_and_file_identity() {
++        let (root, path, mut app) = replaced_parent_fixture();
++        let parent = root.path().join("current");
++        let sibling = parent.join("B.md");
++        std::fs::write(&sibling, "sibling-one\n").unwrap();
++        let (helper, args) = recording_helper(root.path());
++        launch_recording_helper(&mut app, &helper);
++        let canonical = path.canonicalize().unwrap();
++        assert_eq!(canonical, path, "FILE is the reviewed spelling, not a resolution");
++        let recorded = std::fs::read_to_string(&args).unwrap();
++        let argv: Vec<&str> = recorded.lines().collect();
++        assert_eq!(argv.len(), 5, "exactly FILE LINE COL PARENT_ID FILE_ID: {argv:?}");
++        assert_eq!(argv[0], canonical.to_str().unwrap());
++        assert_eq!(argv[1], "1");
++        assert_eq!(argv[2], "1");
++        assert_eq!(argv[3], parent_id_of(&parent));
++        assert_eq!(argv[4], file_id_of(&canonical));
++        assert_ne!(argv[4], file_id_of(&sibling), "never the sibling's identity");
++        for id in [argv[3], argv[4]] {
++            let (dev, ino) = id.split_once(':').unwrap();
++            assert!(dev.parse::<u64>().is_ok() && ino.parse::<u64>().is_ok(), "{id}");
++        }
++        assert_eq!(app.status, "opened original in editor");
++        assert_eq!(std::fs::read_to_string(&sibling).unwrap(), "sibling-one\n");
++    }
++
++    /// The security-1153 P2: the reviewed `A.md` replaced, inside the SAME held parent,
++    /// by a symlink to a sibling `B.md` (or by a FIFO, or removed). The parent identity
++    /// still matches, so only the original's own identity can refuse; the helper never runs.
++    #[cfg(unix)]
++    #[test]
++    fn document_edit_original_refuses_same_parent_symlink_or_nonregular_original() {
++        use std::os::unix::fs::symlink;
++        for case in ["absolute-symlink", "relative-symlink", "fifo", "missing"] {
++            let (root, path, mut app) = replaced_parent_fixture();
++            let parent = root.path().join("current");
++            let sibling = parent.join("B.md");
++            std::fs::write(&sibling, "sibling-one\n").unwrap();
++            let held_parent = parent_id_of(&parent);
++            std::fs::remove_file(&path).unwrap();
++            match case {
++                "absolute-symlink" => symlink(&sibling, &path).unwrap(),
++                "relative-symlink" => symlink("B.md", &path).unwrap(),
++                "fifo" => rustix::fs::mknodat(
++                    rustix::fs::CWD,
++                    &path,
++                    rustix::fs::FileType::Fifo,
++                    rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
++                    0,
++                )
++                .unwrap(),
++                _ => {}
++            }
++            assert_eq!(parent_id_of(&parent), held_parent, "{case}: parent is unchanged");
++            let (helper, args) = recording_helper(root.path());
++            assert!(app.edit_original_with(helper.as_os_str()).is_err(), "{case}");
++            assert!(!args.exists(), "{case}: the helper must never be launched");
++            assert!(app.status.starts_with("edit original failed:"), "{case}: {}", app.status);
++            assert_eq!(std::fs::read_to_string(&sibling).unwrap(), "sibling-one\n", "{case}");
++            assert_eq!(app.store.len(), 1, "{case}");
++        }
 +    }
 +
 +    #[cfg(unix)]
@@ -1188,10 +1274,10 @@ index 39baa9a..e4ceefc 100644
          let c = parse(&["--poll", "500", "--base", "origin/dev", "/tmp/work"]);
 diff --git a/src/document.rs b/src/document.rs
 new file mode 100644
-index 0000000..079a5d6
+index 0000000..0fdb4f0
 --- /dev/null
 +++ b/src/document.rs
-@@ -0,0 +1,1197 @@
+@@ -0,0 +1,1272 @@
 +//! Single-document comment snapshots, separate from the git review model.
 +//!
 +//! The approved document-mode contract persists the seven fields in
@@ -1369,6 +1455,28 @@ index 0000000..079a5d6
 +            Ok(format_parent_id(&stat))
 +        }
 +
++        /// The original's own identity per the cross-language FILE_ID contract: the
++        /// basename opened relative to the HELD parent with NOFOLLOW (so a symlink is
++        /// refused, never resolved to a sibling), required regular, then fstat'd and
++        /// formatted exactly like PARENT_ID. A FIFO never blocks the open.
++        pub fn file_id(&self) -> Result<String> {
++            self.verify_location()?;
++            let fd = rfs::openat(
++                &self.directory,
++                entry_name(&self.path)?,
++                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
++                Mode::empty(),
++            )
++            .with_context(|| format!("open document {}", self.path.display()))?;
++            let file = File::from(fd);
++            let stat = rfs::fstat(&file)
++                .with_context(|| format!("inspect document {}", self.path.display()))?;
++            if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
++                bail!("refusing non-regular original: {}", self.path.display());
++            }
++            Ok(format_parent_id(&stat))
++        }
++
 +        /// Permit atomic replacement of the original, but never a different parent,
 +        /// a missing/non-regular target, or a lock entry no longer naming our lease.
 +        pub fn verify_location(&self) -> Result<()> {
@@ -1426,6 +1534,7 @@ index 0000000..079a5d6
 +        Ok(())
 +    }
 +
++    /// The shared PARENT_ID/FILE_ID formatter: unsigned decimal `DEV:INO`.
 +    /// `st_dev as u64` deliberately matches the contract on platforms with a signed dev_t.
 +    #[allow(clippy::unnecessary_cast)]
 +    fn format_parent_id(stat: &Stat) -> String {
@@ -2331,6 +2440,53 @@ index 0000000..079a5d6
 +            assert!(document.read_original(none).is_err());
 +        }
 +
++        /// The FILE_ID contract: the original's own `DEV:INO` via the held parent, never
++        /// through a symlink, never a FIFO/missing entry, and the NEW inode after an
++        /// atomic same-parent replacement.
++        #[test]
++        fn file_id_is_the_held_parent_bound_regular_original() {
++            use std::os::unix::fs::{MetadataExt, symlink};
++            let id_of = |path: &Path| {
++                let meta = fs::symlink_metadata(path).unwrap();
++                format!("{}:{}", meta.dev(), meta.ino())
++            };
++            let dir = tempfile::tempdir().unwrap();
++            let path = original(dir.path());
++            let sibling = dir.path().join("B.md");
++            fs::write(&sibling, b"sibling").unwrap();
++            let (document, _) = Document::open(&path).unwrap();
++            let first = document.file_id().unwrap();
++            assert_eq!(first, id_of(&path));
++            assert_ne!(first, id_of(&sibling));
++            assert_ne!(first, document.parent_id().unwrap());
++
++            // Same-parent atomic replacement yields the NEW inode.
++            let temp = dir.path().join("editor.tmp");
++            fs::write(&temp, b"edited").unwrap();
++            let replacement = id_of(&temp);
++            fs::rename(&temp, &path).unwrap();
++            let second = document.file_id().unwrap();
++            assert_eq!(second, replacement);
++            assert_ne!(second, first);
++
++            // A same-parent symlink to a sibling (absolute or relative) is refused.
++            for target in [sibling.as_path(), Path::new("B.md")] {
++                fs::remove_file(&path).unwrap();
++                symlink(target, &path).unwrap();
++                assert!(document.file_id().is_err(), "symlink to {}", target.display());
++            }
++            // A FIFO never blocks and is refused; a missing original is refused.
++            fs::remove_file(&path).unwrap();
++            rustix::fs::mknodat(rustix::fs::CWD, &path, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0)
++                .unwrap();
++            assert!(document.file_id().is_err(), "FIFO");
++            fs::remove_file(&path).unwrap();
++            assert!(document.file_id().is_err(), "missing");
++            assert_eq!(fs::read(&sibling).unwrap(), b"sibling");
++            fs::write(&path, b"restored").unwrap();
++            assert_eq!(document.file_id().unwrap(), id_of(&path));
++        }
++
 +        #[cfg(unix)]
 +        #[test]
 +        fn private_snapshot_and_lock_permissions() {
@@ -2381,6 +2537,11 @@ index 0000000..079a5d6
 +
 +    /// No held parent identity exists on unsupported systems.
 +    pub fn parent_id(&self) -> anyhow::Result<String> {
++        anyhow::bail!("document mode requires Unix directory-relative filesystem operations")
++    }
++
++    /// No held-parent-bound original identity exists on unsupported systems.
++    pub fn file_id(&self) -> anyhow::Result<String> {
 +        anyhow::bail!("document mode requires Unix directory-relative filesystem operations")
 +    }
 +

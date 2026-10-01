@@ -76,20 +76,27 @@ class OpenFileTests(unittest.TestCase):
         path.write_text(text)
         path.chmod(0o755)
 
-    def invoke(self, file=None, line='2', col='13', edit=False, parent=None):
+    def invoke(self, file=None, line='2', col='13', edit=False, parent=None, file_id=None):
         """Run the named public helper with the isolated fixture environment.
 
-        Edit mode passes Reviewr's held-parent DEV:INO, by default the real one."""
+        Edit mode passes Reviewr's held-parent and original-file DEV:INO,
+        by default the real current ones."""
         name = 'herdr-review-edit-original' if edit else 'herdr-review-last-markdown'
-        argv = [str(self.launch / name), str(file or self.file), line, col]
+        target = file or self.file
+        argv = [str(self.launch / name), str(target), line, col]
         if edit:
-            argv.append(parent or self.parent_id((file or self.file).resolve().parent))
+            argv += [parent or self.ident(os.stat(target.parent)),
+                     file_id or self.ident(os.lstat(target))]
         return subprocess.run(argv, env=self.env, capture_output=True, text=True)
 
     @staticmethod
-    def parent_id(directory):
-        info = os.stat(directory)
+    def ident(info):
         return f'{info.st_dev & 0xFFFFFFFFFFFFFFFF}:{info.st_ino}'
+
+    def edit_raw(self, *args):
+        """Call the edit entry point with exactly these arguments."""
+        return subprocess.run([str(self.launch / 'herdr-review-edit-original'), *args],
+                              env=self.env, capture_output=True, text=True)
 
     def calls(self):
         """Read exact manager argv, preserving shell metacharacters."""
@@ -203,7 +210,8 @@ class OpenFileTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(self.program_log.read_text()),
                          [str(self.explorr), '--single-file-at', str(self.file), '2', '13',
-                          '--expect-parent', self.parent_id(self.file.parent)])
+                          '--expect-parent', self.ident(os.stat(self.file.parent)),
+                          '--expect-file', self.ident(os.lstat(self.file))])
         self.assertNotIn('--open-at', self.calls()[1][3])
         self.assertNotIn('--herdr-open', self.calls()[1][3])
 
@@ -214,7 +222,7 @@ class OpenFileTests(unittest.TestCase):
         current.mkdir()
         document = current / 'A.md'
         document.write_text('reviewed document')
-        held = self.parent_id(current)
+        held = self.ident(os.stat(current))
         current.rename(self.base / 'moved')
         current.mkdir()
         document.write_text('different document at the same pathname')
@@ -223,20 +231,81 @@ class OpenFileTests(unittest.TestCase):
         self.assertIn('directory was replaced', result.stderr)
         self.assertEqual(self.calls(), [])
 
-    def test_edit_requires_well_formed_parent_identity(self):
-        for parent in ['', '1', '1:', ':2', '1:2:3', '-1:2', '1:2\n', '1:2; touch bad']:
-            with self.subTest(parent=parent):
-                result = subprocess.run([str(self.launch / 'herdr-review-edit-original'),
-                                         str(self.file), '2', '13', parent],
-                                        env=self.env, capture_output=True, text=True)
+    def test_edit_requires_well_formed_identities(self):
+        good_parent = self.ident(os.stat(self.file.parent))
+        good_file = self.ident(os.lstat(self.file))
+        for bad in ['', '1', '1:', ':2', '1:2:3', '-1:2', '1:2\n', '1:2; touch bad']:
+            for args in [(bad, good_file), (good_parent, bad)]:
+                with self.subTest(args=args):
+                    result = self.edit_raw(str(self.file), '2', '13', *args)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(self.calls(), [])
+        for args in [(), (good_parent,), (good_parent, good_file, good_file)]:
+            with self.subTest(count=len(args)):
+                result = self.edit_raw(str(self.file), '2', '13', *args)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('PARENT_ID FILE_ID', result.stderr)
+                self.assertEqual(self.calls(), [])
+
+    def same_parent_pair(self):
+        """Reviewed current/A.md beside unrelated current/B.md, with A's identities."""
+        current = self.base / 'current'
+        current.mkdir()
+        a, b = current / 'A.md', current / 'B.md'
+        a.write_text('reviewed A')
+        b.write_text('unrelated B')
+        return a, b, self.ident(os.stat(current)), self.ident(os.lstat(a))
+
+    def test_edit_refuses_same_parent_symlink_swap(self):
+        # The round-3 P2: after Reviewr verified, A becomes a symlink to B in the
+        # SAME directory. Resolving would hand Explorr B with a matching parent.
+        a, b, parent, file_id = self.same_parent_pair()
+        a.unlink()
+        a.symlink_to(b.name)
+        result = self.invoke(file=a, edit=True, parent=parent, file_id=file_id)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('no longer a regular file', result.stderr)
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(b.read_text(), 'unrelated B')
+
+    def test_edit_refuses_same_parent_hard_link_or_replacement(self):
+        a, b, parent, file_id = self.same_parent_pair()
+        a.unlink()
+        os.link(b, a)                      # regular file, but B's inode
+        result = self.invoke(file=a, edit=True, parent=parent, file_id=file_id)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('document was replaced', result.stderr)
+        self.assertEqual(self.calls(), [])
+        # Restore A, take its identity, then atomically rename a different file over
+        # it (created while A still exists, so the inode cannot be reused).
+        a.unlink()
+        a.write_text('reviewed A')
+        file_id = self.ident(os.lstat(a))
+        temp = a.with_name('editor.tmp')
+        temp.write_text('a different regular file')
+        temp.replace(a)
+        result = self.invoke(file=a, edit=True, parent=parent, file_id=file_id)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.calls(), [])
+
+    def test_edit_requires_absolute_normalized_path(self):
+        a, _, parent, file_id = self.same_parent_pair()
+        for spelling in ['current/A.md', f'{a.parent}/./A.md', f'{a.parent}//A.md',
+                         f'{a.parent}/../current/A.md', str(a) + '/']:
+            with self.subTest(spelling=spelling):
+                result = self.edit_raw(spelling, '2', '13', parent, file_id)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(self.calls(), [])
-        result = subprocess.run([str(self.launch / 'herdr-review-edit-original'),
-                                 str(self.file), '2', '13'], env=self.env,
-                                capture_output=True, text=True)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('PARENT_ID', result.stderr)
-        self.assertEqual(self.calls(), [])
+
+    def test_edit_passes_unresolved_original_path(self):
+        # The helper never canonicalizes: what Reviewr verified is what Explorr gets.
+        a, _, parent, file_id = self.same_parent_pair()
+        self.env['EXECUTE_COMMAND'] = '1'
+        result = self.invoke(file=a, edit=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(self.program_log.read_text())[1:],
+                         ['--single-file-at', str(a), '2', '13',
+                          '--expect-parent', parent, '--expect-file', file_id])
 
     def test_plugin_bin_and_absolute_explorr_override(self):
         self.explorr.unlink()

@@ -30,14 +30,45 @@ func (a *App) refuseIsolated(action string) bool {
 	return true
 }
 
-// checkExpectedParent requires t's held parent descriptor to have identity want.
-func checkExpectedParent(t *editor.Tab, want editor.ParentID) error {
-	got, err := t.BoundParentID()
+// isolatedExpectation is the caller-verified identity pair (Reviewr's edit
+// helper) the initial isolated tab must HOLD: its parent directory and the
+// original file itself, both decimal DEV:INO. The parent alone cannot stop a
+// same-folder name swap (A.md -> B.md); the file identity can.
+type isolatedExpectation struct {
+	parent editor.ParentID
+	file   editor.ParentID
+}
+
+// parseIsolatedExpectation parses both identities; either malformed fails.
+func parseIsolatedExpectation(parentID, fileID string) (*isolatedExpectation, error) {
+	parent, err := editor.ParseParentID(parentID)
+	if err != nil {
+		return nil, fmt.Errorf("expected parent: %w", err)
+	}
+	file, err := editor.ParseParentID(fileID)
+	if err != nil {
+		return nil, fmt.Errorf("expected file: %w", err)
+	}
+	return &isolatedExpectation{parent: parent, file: file}, nil
+}
+
+// checkExpected requires t's held parent descriptor AND its held no-follow
+// original descriptor to have exactly the expected identities. Unbound tabs
+// (failed binds, read-only previews) have neither and therefore fail.
+func checkExpected(t *editor.Tab, want isolatedExpectation) error {
+	gotParent, err := t.BoundParentID()
 	if err != nil {
 		return fmt.Errorf("cannot verify parent directory: %w", err)
 	}
-	if got != want {
-		return fmt.Errorf("parent directory identity %s does not match expected %s", got, want)
+	if gotParent != want.parent {
+		return fmt.Errorf("parent directory identity %s does not match expected %s", gotParent, want.parent)
+	}
+	gotFile, err := t.BoundFileID()
+	if err != nil {
+		return fmt.Errorf("cannot verify original file: %w", err)
+	}
+	if gotFile != want.file {
+		return fmt.Errorf("original file identity %s does not match expected %s", gotFile, want.file)
 	}
 	return nil
 }

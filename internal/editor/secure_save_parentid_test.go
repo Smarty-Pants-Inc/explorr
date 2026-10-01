@@ -38,7 +38,7 @@ func TestParseParentID(t *testing.T) {
 }
 
 // TestBoundParentIDRequiresBinding: ordinary and failed-bind tabs have no held
-// parent, so they can never satisfy an expected identity.
+// parent or original, so they can never satisfy an expected identity.
 func TestBoundParentIDRequiresBinding(t *testing.T) {
 	tab, err := NewTab(filepath.Join(t.TempDir(), "missing.txt"))
 	if err != nil {
@@ -47,8 +47,14 @@ func TestBoundParentIDRequiresBinding(t *testing.T) {
 	if id, err := tab.BoundParentID(); err == nil {
 		t.Fatalf("unbound tab reported parent %v", id)
 	}
+	if id, err := tab.BoundFileID(); err == nil {
+		t.Fatalf("unbound tab reported file %v", id)
+	}
 	_ = tab.BindOriginal() // fails: nothing was loaded
 	if id, err := tab.BoundParentID(); err == nil {
 		t.Fatalf("failed binding reported parent %v", id)
+	}
+	if id, err := tab.BoundFileID(); err == nil {
+		t.Fatalf("failed binding reported file %v", id)
 	}
 }

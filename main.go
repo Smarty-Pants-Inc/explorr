@@ -61,9 +61,12 @@ type cliResult struct {
 	OpenCol    int
 	ReviewFile bool // explicit ?review=1, in addition to Markdown's default route
 	Isolated   bool // dedicated --single-file-at launch; ignore shared panel requests
-	// ExpectParent is --single-file-at's optional caller-verified DEV:INO of
-	// the file's parent directory; the isolated pane fails closed on mismatch.
+	// ExpectParent and ExpectFile are --single-file-at's optional, paired,
+	// caller-verified DEV:INO of the file's parent directory and of the file
+	// itself; both set or both empty. The isolated pane fails closed on either
+	// mismatch.
 	ExpectParent string
+	ExpectFile   string
 
 	// DebugAction and HerdRAction hold their validated subcommands.
 	// Both are empty for every other action.
@@ -282,6 +285,42 @@ func openHerdRFile(path string, line, col int, review bool) error {
 	return openFileInHerdRSplit(path, line, col)
 }
 
+// The Reviewr edit-helper contract's identity options. They come as a pair,
+// trailing --single-file-at FILE LINE COL, each with a decimal DEV:INO.
+const (
+	expectParentFlag = "--expect-parent"
+	expectFileFlag   = "--expect-file"
+)
+
+// singleFileAtUsage is the refusal for any malformed --single-file-at form.
+const singleFileAtUsage = "--single-file-at needs a file, line, and column, optionally followed by " +
+	expectParentFlag + " DEV:INO " + expectFileFlag + " DEV:INO"
+
+// parseExpectPair accepts exactly the two identity options (either order, each
+// once) and nothing else; either alone, a duplicate, an extra word or a
+// malformed DEV:INO is an error. The values are returned normalised.
+func parseExpectPair(rest []string) (parent, file string, err error) {
+	if len(rest) != 4 {
+		return "", "", errors.New(singleFileAtUsage + " (" + expectParentFlag + " and " + expectFileFlag + " must be given together)")
+	}
+	seen := map[string]string{}
+	for i := 0; i < len(rest); i += 2 {
+		flag, value := rest[i], rest[i+1]
+		if flag != expectParentFlag && flag != expectFileFlag {
+			return "", "", errors.New(singleFileAtUsage)
+		}
+		if _, dup := seen[flag]; dup {
+			return "", "", fmt.Errorf("%s given twice; %s and %s must be given together", flag, expectParentFlag, expectFileFlag)
+		}
+		id, err := editor.ParseParentID(value)
+		if err != nil {
+			return "", "", fmt.Errorf("%s: %w", flag, err)
+		}
+		seen[flag] = id.String()
+	}
+	return seen[expectParentFlag], seen[expectFileFlag], nil
+}
+
 // resolveArgs parses the editor's tiny CLI surface. The argument can be:
 //
 //   - a flag (--version / -v / --help / -h) → print-and-exit action
@@ -293,19 +332,16 @@ func openHerdRFile(path string, line, col int, review bool) error {
 // Returns a result the caller acts on; file-link validation also resolves local
 // host aliases and symlink targets. Tests pin behavior without launching
 // a real tcell screen.
-// expectParentFlag is the Reviewr edit-helper contract's parent identity option.
-const expectParentFlag = "--expect-parent"
-
 func resolveArgs(args []string) cliResult {
 	if len(args) == 0 {
 		return cliResult{Action: actionEdit, RootDir: "."}
 	}
-	// --expect-parent qualifies only a dedicated --single-file-at launch; on any
-	// other action it would be silently ignored, so it is refused instead.
+	// The identity pair qualifies only a dedicated --single-file-at launch; on
+	// any other action it would be silently ignored, so it is refused instead.
 	if args[0] != "--single-file-at" {
 		for _, arg := range args {
-			if arg == expectParentFlag {
-				return cliResult{Err: errors.New(expectParentFlag + " is only valid after --single-file-at FILE LINE COL")}
+			if arg == expectParentFlag || arg == expectFileFlag {
+				return cliResult{Err: errors.New(arg + " is only valid after --single-file-at FILE LINE COL")}
 			}
 		}
 	}
@@ -360,17 +396,17 @@ func resolveArgs(args []string) cliResult {
 		}
 		return cliResult{Action: actionHerdROpen, OpenFile: path, OpenLine: line, OpenCol: col, ReviewFile: review}
 	case "--single-file-at":
-		var expectParent string
-		if len(args) == 6 && args[4] == expectParentFlag {
-			id, err := editor.ParseParentID(args[5])
+		var expectParent, expectFile string
+		if len(args) > 4 {
+			var err error
+			expectParent, expectFile, err = parseExpectPair(args[4:])
 			if err != nil {
-				return cliResult{Err: fmt.Errorf("%s: %w", expectParentFlag, err)}
+				return cliResult{Err: err}
 			}
-			expectParent = id.String()
 			args = args[:4]
 		}
 		if len(args) != 4 {
-			return cliResult{Err: errors.New("--single-file-at needs a file, line, and column, optionally followed by " + expectParentFlag + " DEV:INO")}
+			return cliResult{Err: errors.New(singleFileAtUsage)}
 		}
 		if err := validateExistingFile(args[1]); err != nil {
 			return cliResult{Err: err}
@@ -385,7 +421,8 @@ func resolveArgs(args []string) cliResult {
 		}
 		return cliResult{
 			Action: actionEdit, RootDir: filepath.Dir(args[1]), OpenFile: args[1],
-			OpenLine: line, OpenCol: col, Isolated: true, ExpectParent: expectParent,
+			OpenLine: line, OpenCol: col, Isolated: true,
+			ExpectParent: expectParent, ExpectFile: expectFile,
 		}
 	case "--debug":
 		// Drive an ALREADY-RUNNING editor's debugger. Same mechanism as
@@ -546,8 +583,8 @@ func main() {
 	switch {
 	case res.Action == actionExplorer:
 		a, err = app.NewExplorer(res.RootDir)
-	case res.Isolated && res.ExpectParent != "":
-		a, err = app.NewIsolatedSingleFileAtExpectingParent(res.OpenFile, res.OpenLine, res.OpenCol, res.ExpectParent)
+	case res.Isolated && (res.ExpectParent != "" || res.ExpectFile != ""):
+		a, err = app.NewIsolatedSingleFileAtExpecting(res.OpenFile, res.OpenLine, res.OpenCol, res.ExpectParent, res.ExpectFile)
 	case res.Isolated:
 		a, err = app.NewIsolatedSingleFileAt(res.OpenFile, res.OpenLine, res.OpenCol)
 	case res.OpenFile != "":

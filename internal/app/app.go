@@ -412,9 +412,9 @@ type App struct {
 	// Their shared publishers/store stay nil so they cannot overwrite another editor's state.
 	// Root containment and sequence floors cannot attribute a sibling's fresh request.
 	isolated bool
-	// expectParent is the caller-verified parent identity the initial isolated
-	// tab must hold; nil once construction finishes.
-	expectParent *editor.ParentID
+	// expect is the caller-verified parent AND file identity pair the initial
+	// isolated tab must hold; nil once construction finishes.
+	expect *isolatedExpectation
 
 	rootDir   string
 	tree      *filetree.Tree
@@ -791,24 +791,27 @@ func NewIsolatedSingleFileAt(filePath string, line, col int) (*App, error) {
 	return newSingleFileAt(filePath, line, col, true, nil)
 }
 
-// NewIsolatedSingleFileAtExpectingParent is NewIsolatedSingleFileAt for callers
-// that already verified the file's parent directory (Reviewr's edit helper):
-// parentID is the decimal DEV:INO they checked. The constructor fails closed
-// (nil app, error, no tab registered) unless the tab's HELD parent descriptor
-// has exactly that identity, so a parent replaced after the caller's check is
-// never opened. Read-only previews cannot be bound and therefore always fail.
-func NewIsolatedSingleFileAtExpectingParent(filePath string, line, col int, parentID string) (*App, error) {
-	want, err := editor.ParseParentID(parentID)
+// NewIsolatedSingleFileAtExpecting is NewIsolatedSingleFileAt for callers
+// that already verified both the original file and its parent directory
+// (Reviewr's edit helper): parentID and fileID are the decimal DEV:INO they
+// checked. filePath's basename is opened relative to the held parent with
+// O_NOFOLLOW (BindOriginal), and the constructor fails closed (nil app, error,
+// no tab registered, no writes) unless the held parent AND the held original
+// have exactly those identities. A parent replaced after the caller's check,
+// or the name redirected inside the same parent (symlink, hard link, or atomic
+// replacement), is never opened. Read-only previews cannot be bound and fail.
+func NewIsolatedSingleFileAtExpecting(filePath string, line, col int, parentID, fileID string) (*App, error) {
+	want, err := parseIsolatedExpectation(parentID, fileID)
 	if err != nil {
 		return nil, err
 	}
-	return newSingleFileAt(filePath, line, col, true, &want)
+	return newSingleFileAt(filePath, line, col, true, want)
 }
 
 // newSingleFileAt establishes channel ownership before bootstrap or opening a tab.
 // Isolated panes keep breakpoint/debug models local, without shared persistence.
 // expect, when non-nil, applies only to this initial open (see openFile).
-func newSingleFileAt(filePath string, line, col int, isolated bool, expect *editor.ParentID) (*App, error) {
+func newSingleFileAt(filePath string, line, col int, isolated bool, expect *isolatedExpectation) (*App, error) {
 	th := theme.Default()
 	scr, err := newScreen(th)
 	if err != nil {
@@ -821,10 +824,10 @@ func newSingleFileAt(filePath string, line, col int, isolated bool, expect *edit
 	}
 
 	a := &App{
-		screen:       scr,
-		theme:        th,
-		isolated:     isolated,
-		expectParent: expect,
+		screen:   scr,
+		theme:    th,
+		isolated: isolated,
+		expect:   expect,
 		// Absolute for the same reason as above; single-file mode has no tree to borrow it from.
 		rootDir:        absOr(rootDir),
 		lastDebugSeq:   debugRequestFloor,
@@ -847,7 +850,7 @@ func newSingleFileAt(filePath string, line, col int, isolated bool, expect *edit
 	// the whole-repo status or tree walk that New performs.
 	err = a.openFileAt(filePath, line, col)
 	// One-shot: later explicit navigation opens other files in other parents.
-	a.expectParent = nil
+	a.expect = nil
 	if err != nil {
 		a.Close()
 		return nil, err
@@ -2440,10 +2443,11 @@ func (a *App) openFile(path string) error {
 			return err
 		}
 	}
-	// A caller-verified parent must be the one actually HELD, checked before
-	// the tab is registered or handed to git/LSP. Unbound previews fail.
-	if a.isolated && a.expectParent != nil {
-		if err := checkExpectedParent(t, *a.expectParent); err != nil {
+	// A caller-verified parent and original must be the ones actually HELD,
+	// checked before the tab is registered or handed to git/LSP. Unbound
+	// previews fail.
+	if a.isolated && a.expect != nil {
+		if err := checkExpected(t, *a.expect); err != nil {
 			_ = t.Close()
 			err = fmt.Errorf("cannot open %s: %w", path, err)
 			a.flash(fmt.Sprintf("Error: %v", err))

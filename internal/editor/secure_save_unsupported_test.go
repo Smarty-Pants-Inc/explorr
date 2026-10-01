@@ -41,6 +41,15 @@ func TestBoundOriginalUnsupportedFailsBeforeWrite(t *testing.T) {
 	if _, _, err := b.reload(path, true); err == nil {
 		t.Fatal("unsupported platform reload succeeded")
 	}
+	if id, err := b.parentID(); err == nil {
+		t.Fatalf("unsupported platform reported parent %v", id)
+	}
+	if id, err := b.fileID(); err == nil {
+		t.Fatalf("unsupported platform reported file %v", id)
+	}
+	if id, err := tab.BoundFileID(); err == nil {
+		t.Fatalf("unsupported binding reported file %v", id)
+	}
 	got, err := os.ReadFile(path)
 	if err != nil || string(got) != "original" {
 		t.Fatalf("unsupported binding changed source: %q, %v", got, err)

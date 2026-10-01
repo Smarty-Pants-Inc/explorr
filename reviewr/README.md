@@ -105,11 +105,14 @@ the new pane to interact with it. Installing/building alone opens nothing.
 In patched document mode, the visible **Edit original** footer action (also
 uppercase `E`) launches the `herdr-review-edit-original` helper beside the installed
 Reviewr binary with the canonical source file, selected current source line, column `1`, and
-the `DEV:INO` identity of the directory Reviewr holds open. Reviewr first checks that this held
-directory is still the one at the document's path. The helper checks it again, and passes it to
-`explorr --single-file-at FILE LINE COL --expect-parent DEV:INO`, which refuses to open unless
-its own bound directory is that same one. A directory replaced after review is refused at every
-step instead of opening a different same-named file.
+two `DEV:INO` identities: the directory Reviewr holds open, and the original file itself, opened
+through that directory without following symlinks. Reviewr first checks that the held directory
+is still the one at the document's path. The helper never resolves the path: it refuses if the
+name is now a symlink or another file, checks both identities again, and runs
+`explorr --single-file-at FILE LINE COL --expect-parent DIR_ID --expect-file FILE_ID`. Explorr
+opens the name inside its own bound directory without following symlinks and refuses unless both
+identities match. A directory or file replaced after review (including a symlink to a sibling
+file) is refused at every step instead of opening a different file.
 This does not depend on the new pane inheriting the link action's PATH. Lowercase `e` still edits a
 review comment. The source opens as a native, single-file Explorr editor in
 another explicit, unfocused right split. Reviewr remains the read/review pane;

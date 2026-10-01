@@ -53,7 +53,7 @@ func TestIsolatedExpectParentMatchBinds(t *testing.T) {
 	isolatedReceiverEnvironment(t)
 	path, _ := isolatedSaveFiles(t)
 	id := isolatedExpectParentID(t, filepath.Dir(path))
-	a, err := NewIsolatedSingleFileAtExpectingParent(path, 1, 2, id)
+	a, err := NewIsolatedSingleFileAtExpecting(path, 1, 2, id, isolatedExpectFileID(t, path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestIsolatedExpectParentMatchBinds(t *testing.T) {
 	if err != nil || got.String() != id {
 		t.Fatalf("bound parent = %v, %v; want %s", got, err, id)
 	}
-	if a.expectParent != nil {
+	if a.expect != nil {
 		t.Fatal("expectation leaked past construction into later navigation")
 	}
 	tab.InsertString("X") // cursor is at line 1, column 2
@@ -91,6 +91,8 @@ func TestIsolatedExpectParentMismatchFailsClosed(t *testing.T) {
 			path, victim := isolatedSaveFiles(t)
 			parent := filepath.Dir(path)
 			id := isolatedExpectParentID(t, parent)
+			// The file identity is the genuine one; only the parent is wrong.
+			fileID := isolatedExpectFileID(t, path)
 			switch kind {
 			case "other-dir":
 				id = isolatedExpectParentID(t, filepath.Dir(victim))
@@ -113,9 +115,10 @@ func TestIsolatedExpectParentMismatchFailsClosed(t *testing.T) {
 				if err := os.WriteFile(path, isolatedExpectPNG(), 0o644); err != nil {
 					t.Fatal(err)
 				}
+				fileID = isolatedExpectFileID(t, path)
 			}
 			before := isolatedPublisherSnapshot(t)
-			a, err := NewIsolatedSingleFileAtExpectingParent(path, 1, 1, id)
+			a, err := NewIsolatedSingleFileAtExpecting(path, 1, 1, id, fileID)
 			if a != nil || err == nil {
 				if a != nil {
 					a.Close()
@@ -162,7 +165,7 @@ func TestIsolatedWithoutExpectParentUnchanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(a.Close)
-	if a.expectParent != nil || len(a.tabs) != 1 {
+	if a.expect != nil || len(a.tabs) != 1 {
 		t.Fatal("plain isolated constructor changed")
 	}
 }

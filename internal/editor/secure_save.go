@@ -59,9 +59,10 @@ func (t *Tab) Close() error {
 	return errors.Join(t.original.original.Close(), t.original.parent.Close())
 }
 
-// ParentID is a directory identity in the cross-language DEV:INO contract
-// shared with Reviewr and its edit helper: decimal, both fields unsigned 64-bit
-// (Go uint64(st.Dev), uint64(st.Ino)).
+// ParentID is a DEV:INO identity in the cross-language contract shared with
+// Reviewr and its edit helper: decimal, both fields unsigned 64-bit (Go
+// uint64(st.Dev), uint64(st.Ino)). It names the parent directory and, through
+// BoundFileID, the original file itself.
 type ParentID struct {
 	Dev uint64
 	Ino uint64
@@ -77,15 +78,15 @@ func (p ParentID) String() string {
 func ParseParentID(s string) (ParentID, error) {
 	dev, ino, ok := strings.Cut(s, ":")
 	if !ok || !parentIDDigits(dev) || !parentIDDigits(ino) {
-		return ParentID{}, fmt.Errorf("invalid parent identity %q: want DEV:INO", s)
+		return ParentID{}, fmt.Errorf("invalid DEV:INO identity %q: want DEV:INO", s)
 	}
 	d, err := strconv.ParseUint(dev, 10, 64)
 	if err != nil {
-		return ParentID{}, fmt.Errorf("invalid parent identity %q: %w", s, err)
+		return ParentID{}, fmt.Errorf("invalid DEV:INO identity %q: %w", s, err)
 	}
 	i, err := strconv.ParseUint(ino, 10, 64)
 	if err != nil {
-		return ParentID{}, fmt.Errorf("invalid parent identity %q: %w", s, err)
+		return ParentID{}, fmt.Errorf("invalid DEV:INO identity %q: %w", s, err)
 	}
 	return ParentID{Dev: d, Ino: i}, nil
 }
@@ -115,6 +116,22 @@ func (t *Tab) BoundParentID() (ParentID, error) {
 		return ParentID{}, fmt.Errorf("original binding is closed")
 	}
 	return t.original.parentID()
+}
+
+// BoundFileID returns the DEV:INO of the original file this tab HOLDS open
+// (fstat of the descriptor opened no-follow relative to the held parent), in
+// the same ParentID type and format as BoundParentID. It names the pinned
+// inode, never a fresh pathname lookup, so a name redirected after binding
+// cannot change it. Unbound, failed or closed bindings, and unsupported
+// platforms, return an error: callers that expect a file must fail closed.
+func (t *Tab) BoundFileID() (ParentID, error) {
+	if !t.originalBound || t.original == nil {
+		return ParentID{}, fmt.Errorf("tab has no bound original file")
+	}
+	if t.original.closed {
+		return ParentID{}, fmt.Errorf("original binding is closed")
+	}
+	return t.original.fileID()
 }
 
 // readTabFile captures identity and contents from the SAME opened file. Ordinary

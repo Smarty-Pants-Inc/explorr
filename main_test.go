@@ -569,40 +569,64 @@ func TestResolveArgs_SingleFileAtCarriesPosition(t *testing.T) {
 	}
 }
 
-// TestResolveArgs_SingleFileAtExpectParent parses the shared DEV:INO contract
-// only as the trailing option of --single-file-at, and rejects it elsewhere.
-func TestResolveArgs_SingleFileAtExpectParent(t *testing.T) {
+// TestResolveArgs_SingleFileAtExpectPair parses the shared DEV:INO contract
+// only as the trailing --expect-parent/--expect-file PAIR of --single-file-at,
+// and rejects either flag alone, malformed IDs, and the flags elsewhere.
+func TestResolveArgs_SingleFileAtExpectPair(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "target.md")
 	if err := os.WriteFile(file, []byte("target"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got := resolveArgs([]string{"--single-file-at", file, "3", "5", "--expect-parent", "2049:18446744073709551615"})
-	if got.Err != nil || !got.Isolated || got.OpenFile != file || got.OpenLine != 3 || got.OpenCol != 5 ||
-		got.ExpectParent != "2049:18446744073709551615" {
-		t.Fatalf("resolved to %+v", got)
+	for _, args := range [][]string{
+		{"--single-file-at", file, "3", "5", "--expect-parent", "2049:18446744073709551615", "--expect-file", "18446744073709551615:7"},
+		{"--single-file-at", file, "3", "5", "--expect-file", "18446744073709551615:7", "--expect-parent", "2049:18446744073709551615"},
+	} {
+		got := resolveArgs(args)
+		if got.Err != nil || !got.Isolated || got.OpenFile != file || got.OpenLine != 3 || got.OpenCol != 5 ||
+			got.ExpectParent != "2049:18446744073709551615" || got.ExpectFile != "18446744073709551615:7" {
+			t.Fatalf("%q resolved to %+v", args, got)
+		}
 	}
-	if got := resolveArgs([]string{"--single-file-at", file, "3", "5"}); got.Err != nil || got.ExpectParent != "" {
-		t.Fatalf("without --expect-parent: %+v", got)
+	if got := resolveArgs([]string{"--single-file-at", file, "3", "5"}); got.Err != nil || got.ExpectParent != "" || got.ExpectFile != "" {
+		t.Fatalf("without the pair: %+v", got)
+	}
+	pair := func(parent, fileID string) []string {
+		return []string{"--single-file-at", file, "3", "5", "--expect-parent", parent, "--expect-file", fileID}
 	}
 	for _, args := range [][]string{
+		// Either half alone.
+		{"--single-file-at", file, "3", "5", "--expect-parent", "1:2"},
+		{"--single-file-at", file, "3", "5", "--expect-file", "1:2"},
 		{"--single-file-at", file, "3", "5", "--expect-parent"},
-		{"--single-file-at", file, "3", "5", "--expect-parent", ""},
-		{"--single-file-at", file, "3", "5", "--expect-parent", "12"},
-		{"--single-file-at", file, "3", "5", "--expect-parent", "1:2:3"},
-		{"--single-file-at", file, "3", "5", "--expect-parent", "-1:2"},
-		{"--single-file-at", file, "3", "5", "--expect-parent", "1:x"},
-		{"--single-file-at", file, "3", "5", "--expect-parent", "18446744073709551616:1"},
-		{"--single-file-at", file, "3", "5", "--expect", "1:2"},
-		{"--single-file-at", file, "3", "5", "--expect-parent", "1:2", "extra"},
-		{"--single-file-at", file, "--expect-parent", "1:2", "3", "5"},
-		{"--expect-parent", "1:2", "--single-file-at", file, "3", "5"},
+		{"--single-file-at", file, "3", "5", "--expect-file"},
+		{"--single-file-at", file, "3", "5", "--expect-parent", "1:2", "--expect-file"},
+		// Duplicates instead of a pair.
+		{"--single-file-at", file, "3", "5", "--expect-parent", "1:2", "--expect-parent", "1:2"},
+		{"--single-file-at", file, "3", "5", "--expect-file", "1:2", "--expect-file", "1:2"},
+		// Malformed identities, in either position.
+		pair("", "1:2"), pair("12", "1:2"), pair("1:2:3", "1:2"), pair("-1:2", "1:2"),
+		pair("1:x", "1:2"), pair("18446744073709551616:1", "1:2"),
+		pair("1:2", ""), pair("1:2", "12"), pair("1:2", "1:2:3"), pair("1:2", "+1:2"),
+		pair("1:2", "1: 2"), pair("1:2", "1:18446744073709551616"),
+		// Unknown or extra trailing words, misplaced flags.
+		{"--single-file-at", file, "3", "5", "--expect", "1:2", "--expect-file", "1:2"},
+		{"--single-file-at", file, "3", "5", "--expect-parent", "1:2", "--expect-file", "1:2", "extra"},
+		{"--single-file-at", file, "--expect-parent", "1:2", "--expect-file", "1:2", "3", "5"},
+		{"--expect-parent", "1:2", "--expect-file", "1:2", "--single-file-at", file, "3", "5"},
+		// The pair (or either half) with any other action.
 		{"--expect-parent", "1:2"},
-		{file, "--expect-parent", "1:2"},
-		{"--open-at", file, "--expect-parent", "1:2"},
-		{"--explorer", dir, "--expect-parent", "1:2"},
-		{"--debug", "start", "--expect-parent", "1:2"},
-		{"--herdr-open", "file://" + file, "--expect-parent", "1:2"},
+		{"--expect-file", "1:2"},
+		{file, "--expect-parent", "1:2", "--expect-file", "1:2"},
+		{file, "--expect-file", "1:2"},
+		{"--open-at", file, "--expect-parent", "1:2", "--expect-file", "1:2"},
+		{"--open-at", file, "--expect-file", "1:2"},
+		{"--explorer", dir, "--expect-parent", "1:2", "--expect-file", "1:2"},
+		{"--explorer", dir, "--expect-file", "1:2"},
+		{"--debug", "start", "--expect-parent", "1:2", "--expect-file", "1:2"},
+		{"--debug", "start", "--expect-file", "1:2"},
+		{"--herdr-open", "file://" + file, "--expect-parent", "1:2", "--expect-file", "1:2"},
+		{"--herdr-open", "file://" + file, "--expect-file", "1:2"},
 	} {
 		if got := resolveArgs(args); got.Err == nil {
 			t.Errorf("accepted %q: %+v", args, got)

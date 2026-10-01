@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 
@@ -16,13 +17,12 @@ import sys
 # Pane numbers use HerdR 0.9.1's public base-32 alphabet (workspace.rs
 # PUBLIC_ID_ALPHABET), so the tenth pane is p A, not p10: w1:pA.
 PANE_ID = re.compile(r"w[A-Za-z0-9_-]+:p[1-9A-HJKMNP-TV-Z0]+\Z")
-# Reviewr's held parent directory, as unsigned DEV:INO from fstat of its fd.
-PARENT_ID = re.compile(r"[0-9]+:[0-9]+\Z")
+# Reviewr's held parent directory and original file, as unsigned DEV:INO.
+DEV_INO = re.compile(r"[0-9]+:[0-9]+\Z")
 
 
-def parent_id(directory):
-    """Format a directory's identity exactly as Reviewr and Explorr do."""
-    info = os.stat(directory)
+def dev_ino(info):
+    """Format an identity exactly as Reviewr and Explorr do."""
     return f"{info.st_dev & 0xFFFFFFFFFFFFFFFF}:{info.st_ino}"
 
 
@@ -82,20 +82,45 @@ def unsafe_path(path):
                for char in path)
 
 
+def edit_target(file_arg, expected_parent, expected_file):
+    """Check Reviewr's already-canonical original WITHOUT resolving it.
+
+    Resolving would follow a symlink swapped in after Reviewr verified, and
+    hand the editor another file in the same directory. Explorr re-checks both
+    identities itself, through its own no-follow open."""
+    if not os.path.isabs(file_arg) or os.path.normpath(file_arg) != file_arg:
+        raise LaunchError("FILE must be Reviewr's absolute canonical original path")
+    file = Path(file_arg)
+    try:
+        info = os.lstat(file)
+    except OSError as error:
+        raise LaunchError(f"the reviewed document is gone: {error}") from error
+    if not stat.S_ISREG(info.st_mode):
+        raise LaunchError("the reviewed document is no longer a regular file "
+                          "(symlink or other); refusing to edit")
+    if dev_ino(info) != expected_file:
+        raise LaunchError("the reviewed document was replaced; refusing to edit")
+    if dev_ino(os.stat(file.parent)) != expected_parent:
+        raise LaunchError("the reviewed document's directory was replaced; refusing to edit")
+    return file
+
+
 def launch(args, edit=False):
     """Validate before splitting, launch once, and clean up only our new pane."""
-    # Edit original carries Reviewr's held parent identity so the native editor
-    # binds the same directory Reviewr verified, never a replacement at that path.
-    if len(args) != (4 if edit else 3):
-        raise LaunchError("usage: FILE LINE COL" + (" PARENT_ID" if edit else "")
+    # Edit original carries the identities of Reviewr's held directory AND the
+    # original file, so the native editor binds exactly what Reviewr verified.
+    if len(args) != (5 if edit else 3):
+        raise LaunchError("usage: FILE LINE COL" + (" PARENT_ID FILE_ID" if edit else "")
                           + " (positive, 1-based coordinates)")
     source = os.environ.get("HERDR_PANE_ID", "")
     if not PANE_ID.fullmatch(source):
         raise LaunchError("HERDR_PANE_ID must be a real pane ID (for example w1:p1)")
     file_arg, line, col = args[:3]
-    expected_parent = args[3] if edit else None
-    if edit and not PARENT_ID.fullmatch(expected_parent):
+    expected_parent, expected_file = args[3:] if edit else (None, None)
+    if edit and not DEV_INO.fullmatch(expected_parent):
         raise LaunchError("PARENT_ID must be DEV:INO of the reviewed document's directory")
+    if edit and not DEV_INO.fullmatch(expected_file):
+        raise LaunchError("FILE_ID must be DEV:INO of the reviewed document")
     if not file_arg or unsafe_path(file_arg):
         raise LaunchError("FILE must name an existing regular UTF-8 file without control characters")
     if not re.fullmatch(r"[0-9]+", line) or not re.fullmatch(r"[0-9]+", col):
@@ -104,13 +129,14 @@ def launch(args, edit=False):
         raise LaunchError("LINE is outside the supported range (Reviewr: 1..4294967295)")
     if not 1 <= int(col) <= sys.maxsize:
         raise LaunchError("COL must be a positive platform integer")
-    file = Path(file_arg).resolve(strict=True)
-    if unsafe_path(str(file)):
-        raise LaunchError("canonical FILE must be UTF-8 without control characters")
-    if not file.is_file():
-        raise LaunchError("FILE must name an existing regular file")
-    if edit and parent_id(file.parent) != expected_parent:
-        raise LaunchError("the reviewed document's directory was replaced; refusing to edit")
+    if edit:
+        file = edit_target(file_arg, expected_parent, expected_file)
+    else:
+        file = Path(file_arg).resolve(strict=True)
+        if unsafe_path(str(file)):
+            raise LaunchError("canonical FILE must be UTF-8 without control characters")
+        if not file.is_file():
+            raise LaunchError("FILE must name an existing regular file")
     program = program_path(edit)
     manager = os.environ.get("HERDR_BIN_PATH") or "herdr"
     output = run_herdr(manager, "pane", "split", "--pane", source,
@@ -125,7 +151,7 @@ def launch(args, edit=False):
         raise LaunchError("HerdR split response identified a different workspace; refusing it")
     if edit:
         command = [program, "--single-file-at", str(file), str(int(line)), str(int(col)),
-                   "--expect-parent", expected_parent]
+                   "--expect-parent", expected_parent, "--expect-file", expected_file]
     else:
         # Reviewr's anchor is a line, not a character/cursor position.
         command = [program, "--file", str(file), "--line", str(int(line))]

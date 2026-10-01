@@ -180,9 +180,23 @@ func (b *boundOriginal) reload(path string, allowRebind bool) ([]byte, os.FileIn
 // parentID reads DEV:INO from the held parent's FileInfo, captured by fstat on
 // the retained descriptor. uint64(st.Dev) is the shared contract's formatting.
 func (b *boundOriginal) parentID() (ParentID, error) {
-	st, ok := b.parentInfo.Sys().(*syscall.Stat_t)
+	return statID(b.parentInfo, "parent")
+}
+
+// fileID reads DEV:INO from the held original's FileInfo, captured by fstat on
+// the no-follow descriptor (refreshed only by a clean Reload's rebind).
+func (b *boundOriginal) fileID() (ParentID, error) {
+	return statID(b.originalInfo, "file")
+}
+
+// statID extracts the contract's uint64 DEV:INO from an fstat result.
+func statID(info os.FileInfo, what string) (ParentID, error) {
+	if info == nil {
+		return ParentID{}, fmt.Errorf("%s identity is unavailable", what)
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || st == nil {
-		return ParentID{}, fmt.Errorf("parent identity is unavailable")
+		return ParentID{}, fmt.Errorf("%s identity is unavailable", what)
 	}
 	return ParentID{Dev: uint64(st.Dev), Ino: uint64(st.Ino)}, nil
 }
