@@ -18,8 +18,8 @@ const isolatedRefusalPrefix = "Not available in a linked single-file editor: "
 // refuseIsolated reports (and flashes) whether action must be refused because
 // this is an isolated link/edit pane. Such a pane edits ONE bound file through
 // Tab.Save; pathname writers (LSP workspace edits, create/rename/delete, user
-// shell, formatters) could be redirected by a namespace swap, so they are
-// refused outright rather than individually bound. Call it at request time
+// shell, formatters, debug builds) could be redirected by a namespace swap, so
+// they are refused outright rather than individually bound. Call it at request time
 // AND at the final execution point, so a modal or async result already
 // pending when the action fires is still refused.
 func (a *App) refuseIsolated(action string) bool {

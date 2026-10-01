@@ -185,6 +185,11 @@ func (a *App) hasLaunchConfigurations() bool {
 // rather than falling through.
 func (a *App) menuStartDebug() {
 	a.closeMenu()
+	// ponytail: a linked pane edits its one clicked file; a debug build writes
+	// into that folder, so starting a session there is refused outright.
+	if a.refuseIsolated("debug") {
+		return
+	}
 
 	if a.debug != nil && (a.debug.starting || a.debug.running) {
 		a.flash("A debug session is already running — Stop debugging first")
@@ -375,6 +380,11 @@ func noDebuggableTabMessage() string {
 // is not hypothetical here: every one of those steps is a measured trap
 // documented in CLAUDE.md's js-debug section, and each fails silently.
 func (a *App) startDebugSpec(spec dap.LaunchSpec) {
+	// Final execution point: a launch picker or palette entry already pending
+	// when the pane was isolated still cannot start a session.
+	if a.refuseIsolated("debug") {
+		return
+	}
 	if a.dapReg == nil {
 		a.dapReg = dap.NewRegistry(a.rootDir)
 	}

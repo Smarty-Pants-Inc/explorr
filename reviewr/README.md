@@ -118,8 +118,8 @@ source edit targets. A failed launch is shown as an error, not reported as a
 successful edit. Refresh reads the document through the held directory too, so a replaced
 directory shows an error instead of another file's contents. Dedicated native editors reject
 global open/debug panel requests and do not publish shared editor state. They edit only that one
-file: rename symbol, workspace-wide fixes, and file create/rename/delete are refused there with a
-message. Text saves bind the original file and parent directory; replacing
+file: rename symbol, workspace-wide fixes, file create/rename/delete, custom actions, and
+debugging are refused there with a message. Text saves bind the original file and parent directory; replacing
 either makes Save fail while retaining the dirty buffer. Automatic path-based format-on-save
 is disabled in these panes, without changing ordinary project editors.
 
