@@ -81,7 +81,13 @@ type handoffSwapFixture struct {
 
 func newHandoffSwapFixture(t *testing.T, ext string) handoffSwapFixture {
 	t.Helper()
-	dir := filepath.Join(t.TempDir(), "docs")
+	// The receiver must name the canonical target, not a temporary-root
+	// alias such as macOS's /var -> /private/var.
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "docs")
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -292,8 +298,9 @@ func TestExplorerRouteHandoff(t *testing.T) {
 	}
 }
 
-// TestExplorerResolvesTreeSymlinkOnce: a symlink in the tree is resolved once
-// by the explorer; the launch names the canonical target, never the link.
+// TestExplorerResolvesTreeSymlinkOnce: both a symlink in the tree and an
+// aliased parent are resolved once by the explorer; the launch names the
+// canonical target, never either alias (including on Linux).
 func TestExplorerResolvesTreeSymlinkOnce(t *testing.T) {
 	fx := newHandoffSwapFixture(t, ".go")
 	fake := installFakeHerdR(t, "none", fx)
@@ -301,9 +308,17 @@ func TestExplorerResolvesTreeSymlinkOnce(t *testing.T) {
 	if err := os.Symlink("A.go", link); err != nil {
 		t.Fatal(err)
 	}
+	alias := filepath.Join(t.TempDir(), "docs-alias")
+	if err := os.Symlink(fx.dir, alias); err != nil {
+		t.Fatal(err)
+	}
+	clicked := filepath.Join(alias, filepath.Base(link))
 	a := newTestApp(t, filepath.Dir(fx.dir))
 	a.explorer = true
-	a.openTreeFile(link)
+	a.openTreeFile(clicked)
+	if a.tree.ActiveFile != clicked {
+		t.Fatalf("tree active file = %q, want clicked spelling %q", a.tree.ActiveFile, clicked)
+	}
 	if done := waitExplorerDone(t, a); done.err != nil {
 		t.Fatal(done.err)
 	}

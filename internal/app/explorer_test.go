@@ -142,7 +142,13 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(string(calls), "pane split --pane wA:p7 --direction right --cwd "+root+" --no-focus\n") || !strings.Contains(string(calls), " --single-file-at "+shellQuote(file)+" 1 1 --expect-parent ") {
+	// The tree keeps the clicked spelling, but launches the canonical file.
+	// macOS's temporary root commonly aliases /private/var through /var.
+	canonical, err := filepath.EvalSymlinks(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(calls), "pane split --pane wA:p7 --direction right --cwd "+filepath.Dir(canonical)+" --no-focus\n") || !strings.Contains(string(calls), " --single-file-at "+shellQuote(canonical)+" 1 1 --expect-parent ") {
 		t.Fatalf("explorer launch = %q", calls)
 	}
 }
