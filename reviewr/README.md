@@ -117,13 +117,19 @@ and Reviewr's Edit original (Reviewr, then a native editor).
 
 1. The sender resolves the clicked path once, opens its directory and then the file inside it
    without following symlinks, and keeps both open. It passes the path, both `DEV:INO`
-   identities, and a private per-launch handoff directory to the receiver.
+   identities, a private per-launch handoff directory, and a fresh random 128-bit nonce to the
+   receiver. The nonce travels only in the receiver's command line, never in the handoff
+   directory.
 2. The helper never resolves the path again. It refuses a symlink or any other file at that
    name, and checks both identities.
 3. The receiver opens the name inside the directory without following symlinks, refuses
-   unless both identities match, and then writes an acknowledgement in the handoff directory.
-4. Only after that acknowledgement does the sender close its copies, so the file's inode cannot
-   be reused by a replacement in the meantime. A receiver that comes too late finds the
+   unless both identities match, and then writes an acknowledgement in the handoff directory
+   containing the nonce and the `DEV:INO` of the file it bound.
+4. The sender accepts the acknowledgement only if it holds its own nonce and the `DEV:INO` of
+   the file the sender still holds open. An acknowledgement planted by another process (no
+   nonce, the wrong nonce, or another file's identity) counts as none, and the sender times out.
+   Only after a valid acknowledgement does the sender close its copies, so the file's inode
+   cannot be reused by a replacement in the meantime. A receiver that comes too late finds the
    handoff withdrawn and refuses.
 
 A file or directory swapped (symlink, hard link, recreated file, replaced directory) anywhere

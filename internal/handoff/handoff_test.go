@@ -102,7 +102,7 @@ func TestSendAckCompletes(t *testing.T) {
 		dir = s.Dir
 		go func() {
 			time.Sleep(30 * time.Millisecond)
-			if err := Acknowledge(s.Dir); err != nil {
+			if err := Acknowledge(s.Dir, s.Nonce, s.FileID); err != nil {
 				t.Error(err)
 			}
 		}()
@@ -128,13 +128,17 @@ func TestSendWithoutAckReportsError(t *testing.T) {
 	fastTiming(t)
 	file := filepath.Join(t.TempDir(), "A")
 	writeFile(t, file, "A")
-	var dir string
-	err := Send(file, func(s *Sender) error { dir = s.Dir; return nil })
+	var dir, nonce, id string
+	start := time.Now()
+	err := Send(file, func(s *Sender) error { dir, nonce, id = s.Dir, s.Nonce, s.FileID; return nil })
 	if !errors.Is(err, ErrNotConfirmed) || err.Error() != "the editor did not confirm it opened the file" {
 		t.Fatalf("err = %v", err)
 	}
+	if waited := time.Since(start); waited < 200*time.Millisecond {
+		t.Fatalf("sender gave up after %v, before the ack timeout", waited)
+	}
 	assertGone(t, dir)
-	if err := Acknowledge(dir); err == nil {
+	if err := Acknowledge(dir, nonce, id); err == nil {
 		t.Fatal("ack after invalidation succeeded")
 	}
 }
@@ -152,7 +156,7 @@ func TestSendLaunchFailureRunsCloseSteps(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 	assertGone(t, sender.Dir)
-	if err := Acknowledge(sender.Dir); err == nil {
+	if err := Acknowledge(sender.Dir, sender.Nonce, sender.FileID); err == nil {
 		t.Fatal("late ack succeeded")
 	}
 	if _, err := sender.file.Stat(); err == nil {
@@ -166,24 +170,151 @@ func TestSendLaunchFailureRunsCloseSteps(t *testing.T) {
 	}
 }
 
-// TestAcknowledgeIsExclusivePrivate: ack is created 0600, never twice, only
-// under an absolute normalized HANDOFF.
+// testNonce is a well-formed nonce no real sender drew.
+const testNonce = "00112233445566778899aabbccddeeff"
+
+// TestAcknowledgeIsExclusivePrivate: ack is created 0600 with exactly
+// "NONCE FILE_ID\n", never twice, never through a planted symlink, only under
+// an absolute normalized HANDOFF and only with a well-formed nonce.
 func TestAcknowledgeIsExclusivePrivate(t *testing.T) {
 	dir := t.TempDir()
-	if err := Acknowledge(dir); err != nil {
+	if err := Acknowledge(dir, testNonce, "1:2"); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Lstat(filepath.Join(dir, AckName))
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("ack = %v, %v", info, err)
 	}
-	if err := Acknowledge(dir); err == nil {
+	if data, _ := os.ReadFile(filepath.Join(dir, AckName)); string(data) != testNonce+" 1:2\n" {
+		t.Fatalf("ack content = %q", data)
+	}
+	if err := Acknowledge(dir, testNonce, "1:2"); err == nil {
 		t.Fatal("second ack succeeded")
 	}
 	for _, bad := range []string{"rel", dir + "/", dir + "/.", filepath.Join(dir, "missing")} {
-		if err := Acknowledge(bad); err == nil {
+		if err := Acknowledge(bad, testNonce, "1:2"); err == nil {
 			t.Errorf("Acknowledge(%q) accepted", bad)
 		}
+	}
+	other := t.TempDir()
+	for _, nonce := range []string{"", "00", strings.ToUpper(testNonce), testNonce + "00", "zz" + testNonce[2:]} {
+		if err := Acknowledge(other, nonce, "1:2"); err == nil {
+			t.Errorf("nonce %q accepted", nonce)
+		}
+	}
+	if err := Acknowledge(other, testNonce, ""); err == nil {
+		t.Error("empty bound identity accepted")
+	}
+	victim := filepath.Join(t.TempDir(), "victim")
+	writeFile(t, victim, "V")
+	if err := os.Symlink(victim, filepath.Join(other, AckName)); err != nil {
+		t.Fatal(err)
+	}
+	if err := Acknowledge(other, testNonce, "1:2"); err == nil {
+		t.Fatal("ack through a planted symlink succeeded")
+	}
+	if data, _ := os.ReadFile(victim); string(data) != "V" {
+		t.Fatalf("planted symlink target written: %q", data)
+	}
+}
+
+// TestNoncePerHandoff: every handoff draws a fresh well-formed 128-bit nonce.
+func TestNoncePerHandoff(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "A")
+	writeFile(t, file, "A")
+	seen := map[string]bool{}
+	for i := 0; i < 8; i++ {
+		s, err := Identify(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := CheckNonce(s.Nonce); err != nil || seen[s.Nonce] {
+			t.Fatalf("nonce %q: %v (repeat=%v)", s.Nonce, err, seen[s.Nonce])
+		}
+		seen[s.Nonce] = true
+		entries, _ := os.ReadDir(s.Dir)
+		if len(entries) != 0 {
+			t.Fatalf("sender wrote %v into HANDOFF", entries)
+		}
+		_ = s.Abort(nil)
+	}
+}
+
+// TestSendAcceptsValidAckWrittenBeforeAwait: a receiver that bound the held
+// file and acked with the sender's nonce before Await is accepted at once.
+func TestSendAcceptsValidAckWrittenBeforeAwait(t *testing.T) {
+	t.Cleanup(SetTiming(5*time.Second, 5*time.Millisecond))
+	file := filepath.Join(t.TempDir(), "A")
+	writeFile(t, file, "A")
+	start := time.Now()
+	err := Send(file, func(s *Sender) error { return Acknowledge(s.Dir, s.Nonce, lstatID(t, s.File)) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if waited := time.Since(start); waited > 2*time.Second {
+		t.Fatalf("valid ack took %v (treated as missing?)", waited)
+	}
+}
+
+// TestAwaitRejectsForgedAcks is the round-5 P2: a same-UID process that knows
+// HANDOFF can pre-create ack, but without the sender's nonce bound to the held
+// file's DEV:INO its ack is treated exactly like no ack (timeout, then
+// ErrNotConfirmed), and the genuine receiver's O_EXCL ack then fails closed.
+func TestAwaitRejectsForgedAcks(t *testing.T) {
+	const otherNonce = "ffeeddccbbaa99887766554433221100"
+	cases := map[string]func(t *testing.T, s *Sender, ack string){
+		"empty marker": func(t *testing.T, s *Sender, ack string) { writeFile(t, ack, "") },
+		"no nonce":     func(t *testing.T, s *Sender, ack string) { writeFile(t, ack, s.FileID+"\n") },
+		"wrong nonce":  func(t *testing.T, s *Sender, ack string) { writeFile(t, ack, AckContent(otherNonce, s.FileID)) },
+		"right nonce wrong dev:ino": func(t *testing.T, s *Sender, ack string) {
+			other := filepath.Join(filepath.Dir(s.File), "B")
+			writeFile(t, other, "B")
+			writeFile(t, ack, AckContent(s.Nonce, lstatID(t, other)))
+		},
+		"right nonce trailing junk": func(t *testing.T, s *Sender, ack string) {
+			writeFile(t, ack, AckContent(s.Nonce, s.FileID)+"x")
+		},
+		"symlink to a valid ack": func(t *testing.T, s *Sender, ack string) {
+			elsewhere := filepath.Join(t.TempDir(), "ack")
+			writeFile(t, elsewhere, AckContent(s.Nonce, s.FileID))
+			if err := os.Symlink(elsewhere, ack); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"fifo": func(t *testing.T, s *Sender, ack string) {
+			if err := syscall.Mkfifo(ack, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"directory": func(t *testing.T, s *Sender, ack string) {
+			if err := os.Mkdir(ack, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	for name, plant := range cases {
+		t.Run(name, func(t *testing.T) {
+			fastTiming(t)
+			file := filepath.Join(t.TempDir(), "A")
+			writeFile(t, file, "A")
+			var dir string
+			start := time.Now()
+			err := Send(file, func(s *Sender) error {
+				dir = s.Dir
+				plant(t, s, filepath.Join(s.Dir, AckName))
+				if err := Acknowledge(s.Dir, s.Nonce, s.FileID); err == nil {
+					t.Error("genuine receiver acked over a planted ack")
+				}
+				return nil
+			})
+			if !errors.Is(err, ErrNotConfirmed) {
+				t.Fatalf("forged ack accepted: err = %v", err)
+			}
+			if waited := time.Since(start); waited < 200*time.Millisecond {
+				t.Fatalf("forged ack ended the wait early (%v)", waited)
+			}
+			assertGone(t, dir)
+		})
 	}
 }
 

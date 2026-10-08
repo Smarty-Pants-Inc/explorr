@@ -107,7 +107,7 @@ func TestIsolatedExpectFileSameParentSwapFailsClosed(t *testing.T) {
 				t.Fatal("parent identity changed; this is not the same-parent swap")
 			}
 			before := isolatedPublisherSnapshot(t)
-			app, err := NewIsolatedSingleFileAtExpecting(a, 1, 1, parentID, fileID, t.TempDir())
+			app, err := NewIsolatedSingleFileAtExpecting(a, 1, 1, parentID, fileID, t.TempDir(), testHandoffNonce)
 			if app != nil || err == nil {
 				if app != nil {
 					// Prove the harm the expectation must prevent, then fail.
@@ -138,7 +138,7 @@ func TestIsolatedExpectFileSameParentSwapFailsClosed(t *testing.T) {
 func TestIsolatedExpectFileMatchBinds(t *testing.T) {
 	isolatedReceiverEnvironment(t)
 	a, b, parentID, fileID := isolatedExpectFilePair(t)
-	app, err := NewIsolatedSingleFileAtExpecting(a, 1, 2, parentID, fileID, t.TempDir())
+	app, err := NewIsolatedSingleFileAtExpecting(a, 1, 2, parentID, fileID, t.TempDir(), testHandoffNonce)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestIsolatedExpectFileMalformedRejected(t *testing.T) {
 	isolatedReceiverEnvironment(t)
 	a, _, parentID, fileID := isolatedExpectFilePair(t)
 	for _, ids := range [][2]string{{parentID, ""}, {parentID, "1:2:3"}, {"", fileID}, {"-1:2", fileID}} {
-		if app, err := NewIsolatedSingleFileAtExpecting(a, 1, 1, ids[0], ids[1], t.TempDir()); app != nil || err == nil {
+		if app, err := NewIsolatedSingleFileAtExpecting(a, 1, 1, ids[0], ids[1], t.TempDir(), testHandoffNonce); app != nil || err == nil {
 			if app != nil {
 				app.Close()
 			}
@@ -183,7 +183,7 @@ func TestIsolatedExpectFileMalformedRejected(t *testing.T) {
 func TestIsolatedExpectFileErrorNamesFileCheck(t *testing.T) {
 	isolatedReceiverEnvironment(t)
 	a, b, parentID, _ := isolatedExpectFilePair(t)
-	_, err := NewIsolatedSingleFileAtExpecting(a, 1, 1, parentID, isolatedExpectFileID(t, b), t.TempDir())
+	_, err := NewIsolatedSingleFileAtExpecting(a, 1, 1, parentID, isolatedExpectFileID(t, b), t.TempDir(), testHandoffNonce)
 	if err == nil || !strings.Contains(err.Error(), "file identity") {
 		t.Fatalf("error = %v, want a file identity mismatch", err)
 	}

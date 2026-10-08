@@ -19,6 +19,9 @@ import sys
 PANE_ID = re.compile(r"w[A-Za-z0-9_-]+:p[1-9A-HJKMNP-TV-Z0]+\Z")
 # Reviewr's held parent directory and original file, as unsigned DEV:INO.
 DEV_INO = re.compile(r"[0-9]+:[0-9]+\Z")
+# The sender's per-handoff 128-bit secret. It reaches the receiver only through
+# this argv (never the HANDOFF directory); the receiver's ack must carry it.
+NONCE = re.compile(r"[0-9a-f]{32}\Z")
 
 
 def dev_ino(info):
@@ -124,18 +127,21 @@ def checked_handoff(handoff):
 def launch(args, edit=False):
     """Validate before splitting, launch once, and clean up only our new pane."""
     # Every route carries the identities of the file and its directory, held open
-    # by the sender, plus the handoff directory the receiver acknowledges in.
-    if len(args) != 6:
-        raise LaunchError("usage: FILE LINE COL PARENT_ID FILE_ID HANDOFF"
+    # by the sender, plus the handoff directory the receiver acknowledges in and
+    # the sender's nonce the receiver's ack must carry.
+    if len(args) != 7:
+        raise LaunchError("usage: FILE LINE COL PARENT_ID FILE_ID HANDOFF NONCE"
                           " (positive, 1-based coordinates)")
     source = os.environ.get("HERDR_PANE_ID", "")
     if not PANE_ID.fullmatch(source):
         raise LaunchError("HERDR_PANE_ID must be a real pane ID (for example w1:p1)")
-    file_arg, line, col, expected_parent, expected_file, handoff = args
+    file_arg, line, col, expected_parent, expected_file, handoff, nonce = args
     if not DEV_INO.fullmatch(expected_parent):
         raise LaunchError("PARENT_ID must be DEV:INO of the file's directory")
     if not DEV_INO.fullmatch(expected_file):
         raise LaunchError("FILE_ID must be DEV:INO of the file")
+    if not NONCE.fullmatch(nonce):
+        raise LaunchError("NONCE must be the sender's 32 lowercase hex digits")
     if not file_arg or unsafe_path(file_arg):
         raise LaunchError("FILE must name an existing regular UTF-8 file without control characters")
     if not re.fullmatch(r"[0-9]+", line) or not re.fullmatch(r"[0-9]+", col):
@@ -159,7 +165,7 @@ def launch(args, edit=False):
     if pane.split(":")[0] != source.split(":")[0]:
         raise LaunchError("HerdR split response identified a different workspace; refusing it")
     identities = ["--expect-parent", expected_parent, "--expect-file", expected_file,
-                  "--handoff", handoff]
+                  "--handoff", handoff, "--handoff-nonce", nonce]
     if edit:
         command = [program, "--single-file-at", str(file), str(int(line)), str(int(col)),
                    *identities]

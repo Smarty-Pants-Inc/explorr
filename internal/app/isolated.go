@@ -35,14 +35,19 @@ func (a *App) refuseIsolated(action string) bool {
 // FILE (absolute, normalized, never resolved) is opened relative to its parent
 // with O_NOFOLLOW and bound (editor.NewBoundTab), both HELD identities are
 // checked against parentID and fileID, and only then is HANDOFF/ack created
-// (handoff.Acknowledge). Any failure returns no tab: the bound descriptors are
-// released and nothing has been written. The caller registers the returned tab.
-func ReceiveHandoff(filePath, parentID, fileID, handoffDir string) (*editor.Tab, error) {
+// (handoff.Acknowledge) carrying nonce (from this process's argv) and the
+// DEV:INO of the descriptor actually bound. Any failure returns no tab: the
+// bound descriptors are released and nothing has been written. The caller
+// registers the returned tab.
+func ReceiveHandoff(filePath, parentID, fileID, handoffDir, nonce string) (*editor.Tab, error) {
 	if err := handoff.CheckPath(filePath); err != nil {
 		return nil, err
 	}
 	if err := handoff.CheckPath(handoffDir); err != nil {
 		return nil, fmt.Errorf("handoff: %w", err)
+	}
+	if err := handoff.CheckNonce(nonce); err != nil {
+		return nil, err
 	}
 	parent, err := editor.ParseParentID(parentID)
 	if err != nil {
@@ -59,13 +64,18 @@ func ReceiveHandoff(filePath, parentID, fileID, handoffDir string) (*editor.Tab,
 	// Text tabs re-check the identities on the descriptors they keep for Save.
 	// Image previews keep none: NewBoundTab already checked both identities on
 	// the very descriptors it read the image from, and they never re-read.
+	bound := file
 	if !t.IsImage() {
 		if err := checkExpected(t, parent, file); err != nil {
 			_ = t.Close()
 			return nil, fmt.Errorf("cannot open %s: %w", filePath, err)
 		}
+		if bound, err = t.BoundFileID(); err != nil {
+			_ = t.Close()
+			return nil, fmt.Errorf("cannot open %s: %w", filePath, err)
+		}
 	}
-	if err := handoff.Acknowledge(handoffDir); err != nil {
+	if err := handoff.Acknowledge(handoffDir, nonce, bound.String()); err != nil {
 		_ = t.Close()
 		return nil, fmt.Errorf("cannot open %s: %w", filePath, err)
 	}

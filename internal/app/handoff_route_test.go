@@ -55,22 +55,25 @@ func splitShellWords(t *testing.T, command string) []string {
 }
 
 // receiverArgs maps a recorded `--single-file-at FILE LINE COL --expect-parent P
-// --expect-file F --handoff H` launch onto its parts, failing on any other shape.
+// --expect-file F --handoff H --handoff-nonce N` launch onto its parts, failing on any other shape.
 type receiverArgs struct {
-	file              string
-	line, col         int
-	parent, fileID, h string
+	file                     string
+	line, col                int
+	parent, fileID, h, nonce string
 }
+
+// testHandoffNonce is a well-formed nonce for receivers with no real sender.
+const testHandoffNonce = "00112233445566778899aabbccddeeff"
 
 func parseReceiverCommand(t *testing.T, command string) receiverArgs {
 	t.Helper()
 	w := splitShellWords(t, command)
-	if len(w) != 12 || w[0] != "exec" || w[2] != "--single-file-at" || w[6] != "--expect-parent" || w[8] != "--expect-file" || w[10] != "--handoff" {
+	if len(w) != 14 || w[0] != "exec" || w[2] != "--single-file-at" || w[6] != "--expect-parent" || w[8] != "--expect-file" || w[10] != "--handoff" || w[12] != "--handoff-nonce" {
 		t.Fatalf("receiver command %q (words %q) lacks the identity triple", command, w)
 	}
 	line, _ := strconv.Atoi(w[4])
 	col, _ := strconv.Atoi(w[5])
-	return receiverArgs{file: w[3], line: line, col: col, parent: w[7], fileID: w[9], h: w[11]}
+	return receiverArgs{file: w[3], line: line, col: col, parent: w[7], fileID: w[9], h: w[11], nonce: w[13]}
 }
 
 // handoffSwapFixture is docs/A.txt (the clicked file) plus the victim
@@ -179,7 +182,7 @@ func (f *fakeHerdRReceiver) run(bin string, args ...string) ([]byte, error) {
 		f.args = parseReceiverCommand(f.t, args[3])
 		f.fixture.swap(f.t, f.kind)
 		f.ran = true
-		f.app, f.err = NewIsolatedSingleFileAtExpecting(f.args.file, f.args.line, f.args.col, f.args.parent, f.args.fileID, f.args.h)
+		f.app, f.err = NewIsolatedSingleFileAtExpecting(f.args.file, f.args.line, f.args.col, f.args.parent, f.args.fileID, f.args.h, f.args.nonce)
 		return []byte(`{"result":{}}`), nil
 	}
 	return []byte(`{"result":{}}`), nil
@@ -343,7 +346,7 @@ func TestHandoffInodeReuseRefused(t *testing.T) {
 	if got := isolatedExpectFileID(t, fx.a); got == s.FileID {
 		t.Fatalf("held FILE_ID %s was reused", got)
 	}
-	app, err := NewIsolatedSingleFileAtExpecting(fx.a, 1, 1, s.ParentID, s.FileID, s.Dir)
+	app, err := NewIsolatedSingleFileAtExpecting(fx.a, 1, 1, s.ParentID, s.FileID, s.Dir, s.Nonce)
 	if app != nil || err == nil {
 		if app != nil {
 			app.Close()
@@ -382,7 +385,7 @@ func TestHandoffAckAfterInvalidateRefused(t *testing.T) {
 	if err := s.Await(); !errors.Is(err, handoff.ErrNotConfirmed) {
 		t.Fatalf("sender = %v", err)
 	}
-	app, err := NewIsolatedSingleFileAtExpecting(fx.a, 1, 1, s.ParentID, s.FileID, s.Dir)
+	app, err := NewIsolatedSingleFileAtExpecting(fx.a, 1, 1, s.ParentID, s.FileID, s.Dir, s.Nonce)
 	if app != nil || err == nil || !strings.Contains(err.Error(), "acknowledge") {
 		if app != nil {
 			app.Close()
@@ -410,7 +413,7 @@ func TestReceiverRequiresNormalizedAbsolutePaths(t *testing.T) {
 		{fx.dir + "/./A.go", s.Dir}, {fx.dir + "//A.go", s.Dir}, {"docs/A.go", s.Dir},
 		{fx.dir + "/../docs/A.go", s.Dir}, {fx.a, s.Dir + "/"}, {fx.a, "rel"},
 	} {
-		if app, err := NewIsolatedSingleFileAtExpecting(tc[0], 1, 1, s.ParentID, s.FileID, tc[1]); app != nil || err == nil {
+		if app, err := NewIsolatedSingleFileAtExpecting(tc[0], 1, 1, s.ParentID, s.FileID, tc[1], s.Nonce); app != nil || err == nil {
 			if app != nil {
 				app.Close()
 			}
@@ -441,7 +444,7 @@ func TestReceiveHandoffImagePreview(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Abort(nil)
-	tab, err := ReceiveHandoff(pic, s.ParentID, s.FileID, s.Dir)
+	tab, err := ReceiveHandoff(pic, s.ParentID, s.FileID, s.Dir, s.Nonce)
 	if err != nil {
 		t.Fatalf("image handoff refused: %v", err)
 	}
@@ -464,7 +467,7 @@ func TestReceiveHandoffImagePreview(t *testing.T) {
 	if err := os.Symlink("A.png", other); err != nil {
 		t.Fatal(err)
 	}
-	if swapped, err := ReceiveHandoff(other, s2.ParentID, s2.FileID, s2.Dir); swapped != nil || err == nil {
+	if swapped, err := ReceiveHandoff(other, s2.ParentID, s2.FileID, s2.Dir, s2.Nonce); swapped != nil || err == nil {
 		t.Fatal("swapped image accepted")
 	}
 	if _, statErr := os.Lstat(filepath.Join(s2.Dir, handoff.AckName)); !os.IsNotExist(statErr) {
@@ -481,13 +484,13 @@ func TestReceiveHandoffOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Abort(nil)
-	if tab, err := ReceiveHandoff(fx.a, s.ParentID, isolatedExpectFileID(t, fx.b), s.Dir); tab != nil || err == nil {
+	if tab, err := ReceiveHandoff(fx.a, s.ParentID, isolatedExpectFileID(t, fx.b), s.Dir, s.Nonce); tab != nil || err == nil {
 		t.Fatal("mismatched FILE_ID accepted")
 	}
 	if _, statErr := os.Lstat(filepath.Join(s.Dir, handoff.AckName)); !os.IsNotExist(statErr) {
 		t.Fatal("mismatch acknowledged")
 	}
-	tab, err := ReceiveHandoff(fx.a, s.ParentID, s.FileID, s.Dir)
+	tab, err := ReceiveHandoff(fx.a, s.ParentID, s.FileID, s.Dir, s.Nonce)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -11,6 +11,8 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parent
+# A well-formed sender nonce (32 lowercase hex digits).
+NONCE = '00112233445566778899aabbccddeeff'
 FAKE_HERDR = '''#!/usr/bin/env python3
 import json, os, subprocess, sys
 args = sys.argv[1:]
@@ -80,7 +82,7 @@ class OpenFileTests(unittest.TestCase):
         path.chmod(0o755)
 
     def invoke(self, file=None, line='2', col='13', edit=False, parent=None, file_id=None,
-               handoff=None):
+               handoff=None, nonce=NONCE):
         """Run the named public helper with the isolated fixture environment.
 
         Both modes pass the sender's held DEV:INO identities and its handoff
@@ -89,7 +91,7 @@ class OpenFileTests(unittest.TestCase):
         return self.raw(edit, str(target), line, col,
                         parent or self.ident_of(target.parent, os.stat),
                         file_id or self.ident_of(target, os.lstat),
-                        handoff or str(self.handoff))
+                        handoff or str(self.handoff), nonce)
 
     @staticmethod
     def ident(info):
@@ -109,7 +111,8 @@ class OpenFileTests(unittest.TestCase):
 
     def identities(self, file):
         return ['--expect-parent', self.ident(os.stat(file.parent)),
-                '--expect-file', self.ident(os.lstat(file)), '--handoff', str(self.handoff)]
+                '--expect-file', self.ident(os.lstat(file)), '--handoff', str(self.handoff),
+                '--handoff-nonce', NONCE]
 
     def calls(self):
         """Read exact manager argv, preserving shell metacharacters."""
@@ -251,7 +254,7 @@ class OpenFileTests(unittest.TestCase):
 
     def test_both_modes_require_well_formed_identities_and_handoff(self):
         good = [self.ident(os.stat(self.file.parent)), self.ident(os.lstat(self.file)),
-                str(self.handoff)]
+                str(self.handoff), NONCE]
         for edit in (False, True):
             for bad in ['', '1', '1:', ':2', '1:2:3', '-1:2', '1:2\n', '1:2; touch bad']:
                 for index in (0, 1):
@@ -261,11 +264,18 @@ class OpenFileTests(unittest.TestCase):
                         result = self.raw(edit, str(self.file), '2', '13', *args)
                         self.assertNotEqual(result.returncode, 0)
                         self.assertEqual(self.calls(), [])
-            for args in [[], good[:1], good[:2], good + ['extra']]:
+            for args in [[], good[:1], good[:2], good[:3], good + ['extra']]:
                 with self.subTest(edit=edit, count=len(args)):
                     result = self.raw(edit, str(self.file), '2', '13', *args)
                     self.assertNotEqual(result.returncode, 0)
-                    self.assertIn('PARENT_ID FILE_ID HANDOFF', result.stderr)
+                    self.assertIn('PARENT_ID FILE_ID HANDOFF NONCE', result.stderr)
+                    self.assertEqual(self.calls(), [])
+            for bad in ['', NONCE[:30], NONCE + '00', NONCE.upper(), 'zz' + NONCE[2:],
+                        NONCE + '\n', "x'; touch bad"]:
+                with self.subTest(edit=edit, nonce=bad):
+                    result = self.raw(edit, str(self.file), '2', '13', *good[:3], bad)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('NONCE', result.stderr)
                     self.assertEqual(self.calls(), [])
 
     def test_handoff_must_be_a_private_directory_owned_by_this_user(self):
@@ -351,12 +361,14 @@ class OpenFileTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(self.program_log.read_text())[1:],
                          ['--single-file-at', str(a), '2', '13', '--expect-parent', parent,
-                          '--expect-file', file_id, '--handoff', str(self.handoff)])
+                          '--expect-file', file_id, '--handoff', str(self.handoff),
+                          '--handoff-nonce', NONCE])
         result = self.invoke(file=a)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(self.program_log.read_text())[1:],
                          ['--file', str(a), '--line', '2', '--expect-parent', parent,
-                          '--expect-file', file_id, '--handoff', str(self.handoff)])
+                          '--expect-file', file_id, '--handoff', str(self.handoff),
+                          '--handoff-nonce', NONCE])
 
     def test_plugin_bin_and_absolute_explorr_override(self):
         self.explorr.unlink()
@@ -394,7 +406,7 @@ class OpenFileTests(unittest.TestCase):
         result = subprocess.run([str(plugin_bin / 'herdr-review-last-markdown'),
                                  str(self.file), '2', '1',
                                  self.ident(os.stat(self.file.parent)),
-                                 self.ident(os.lstat(self.file)), str(self.handoff)],
+                                 self.ident(os.lstat(self.file)), str(self.handoff), NONCE],
                                 env=self.env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(shlex.split(self.calls()[1][3])[1], str(plugin_bin / 'herdr-reviewr'))

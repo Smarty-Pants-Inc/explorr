@@ -790,11 +790,11 @@ func NewSingleFileAt(filePath string, line, col int) (*App, error) {
 // filePath must be absolute and normalized and is never resolved. Before any
 // screen exists, ReceiveHandoff binds filePath relative to its held parent with
 // O_NOFOLLOW, requires the held parent and original to be exactly parentID and
-// fileID, and creates handoffDir/ack; only then is the UI started and the tab
+// fileID, and creates handoffDir/ack carrying nonce; only then is the UI started and the tab
 // registered. Any failure (swap, mismatch, read-only preview, invalidated
 // HANDOFF) fails closed: nil app, an error, no tab, no writes.
-func NewIsolatedSingleFileAtExpecting(filePath string, line, col int, parentID, fileID, handoffDir string) (*App, error) {
-	tab, err := ReceiveHandoff(filePath, parentID, fileID, handoffDir)
+func NewIsolatedSingleFileAtExpecting(filePath string, line, col int, parentID, fileID, handoffDir, nonce string) (*App, error) {
+	tab, err := ReceiveHandoff(filePath, parentID, fileID, handoffDir, nonce)
 	if err != nil {
 		return nil, err
 	}

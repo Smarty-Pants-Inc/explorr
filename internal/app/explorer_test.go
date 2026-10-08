@@ -47,7 +47,7 @@ func TestOpenFileInHerdRSplitIgnoresAmbientScope(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			log := fakeExplorerHerdR(t, `case "$1:$2" in
   pane:split) printf '%s\n' '{"result":{"pane":{"pane_id":"wA:p8","workspace_id":"wA","tab_id":"wA:t1"}}}' ;;
-  pane:run) h=${4##*"--handoff '"}; h=${h%"'"}; : > "$h/ack"; printf '%s\n' '{"result":{}}' ;;
+  pane:run) h=${4##*"--handoff '"}; h=${h%%"'"*}; n=${4##*"--handoff-nonce '"}; n=${n%"'"}; f=${4##*"--expect-file '"}; f=${f%%"'"*}; printf '%s %s\n' "$n" "$f" > "$h/ack"; printf '%s\n' '{"result":{}}' ;;
   *) printf '%s\n' '{"result":{}}' ;;
 esac
 `)
@@ -115,7 +115,7 @@ func TestOpenFileInHerdRSplitStaleOriginDoesNotRetry(t *testing.T) {
 func TestExplorerActivationUsesOwnPane(t *testing.T) {
 	log := fakeExplorerHerdR(t, `case "$1:$2" in
   pane:split) printf '%s\n' '{"result":{"pane":{"pane_id":"wA:p8"}}}' ;;
-  pane:run) h=${4##*"--handoff '"}; h=${h%"'"}; : > "$h/ack"; printf '%s\n' '{"result":{}}' ;;
+  pane:run) h=${4##*"--handoff '"}; h=${h%%"'"*}; n=${4##*"--handoff-nonce '"}; n=${n%"'"}; f=${4##*"--expect-file '"}; f=${f%%"'"*}; printf '%s %s\n' "$n" "$f" > "$h/ack"; printf '%s\n' '{"result":{}}' ;;
   *) printf '%s\n' '{"result":{}}' ;;
 esac
 `)

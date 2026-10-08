@@ -163,7 +163,7 @@ func OpenFileInHerdRSplitWith(run HerdRRunner, path string, line, col int) error
 // startFileInHerdRSplit requires an explicit tiled origin; missing or legacy
 // sidebar origins must never fall back to another client's focused pane. It
 // identifies and HOLDS FILE (handoff.Identify) before launching
-// `--single-file-at FILE LINE COL --expect-parent P --expect-file F --handoff H`
+// `--single-file-at FILE LINE COL --expect-parent P --expect-file F --handoff H --handoff-nonce N`
 // in a new split; a launch failure runs the handoff close steps. On success
 // the caller must Await the returned sender.
 func startFileInHerdRSplit(run HerdRRunner, path string, line, col int, sourcePaneID string) (*handoff.Sender, error) {
@@ -216,7 +216,7 @@ func launchHerdRSplit(run HerdRRunner, herdrBin, executable string, s *handoff.S
 	command := "exec " + shellQuote(executable) + " --single-file-at " + shellQuote(s.File) +
 		" " + fmt.Sprint(max(1, line)) + " " + fmt.Sprint(max(1, col)) +
 		" --expect-parent " + shellQuote(s.ParentID) + " --expect-file " + shellQuote(s.FileID) +
-		" --handoff " + shellQuote(s.Dir)
+		" --handoff " + shellQuote(s.Dir) + " --handoff-nonce " + shellQuote(s.Nonce)
 	if _, err := run(herdrBin, "pane", "run", paneID, command); err != nil {
 		_, _ = run(herdrBin, "pane", "close", paneID)
 		return err

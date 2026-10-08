@@ -91,7 +91,7 @@ func (f mainSwapFixture) assertUntouched(t *testing.T) {
 // then the shared ack step. It returns whether it "opened" the file.
 func emulatedReviewrReceiver(t *testing.T, argv []string) bool {
 	t.Helper()
-	file, parent, fileID, dir := argv[0], argv[3], argv[4], argv[5]
+	file, parent, fileID, dir, nonce := argv[0], argv[3], argv[4], argv[5], argv[6]
 	if handoff.CheckPath(file) != nil {
 		return false
 	}
@@ -101,7 +101,7 @@ func emulatedReviewrReceiver(t *testing.T, argv []string) bool {
 	if got, _ := mainLstatID(t, filepath.Dir(file), true); got != parent {
 		return false
 	}
-	return handoff.Acknowledge(dir) == nil
+	return handoff.Acknowledge(dir, nonce, fileID) == nil
 }
 
 // installReviewHelper puts a helper on PATH and replaces its execution with a
@@ -133,7 +133,7 @@ func installReviewHelper(t *testing.T, onRun func(argv []string)) {
 }
 
 // TestMarkdownRouteHandoff: the --herdr-open Markdown route calls the helper
-// with exactly FILE LINE COL PARENT_ID FILE_ID HANDOFF and waits for the ack;
+// with exactly FILE LINE COL PARENT_ID FILE_ID HANDOFF NONCE and waits for the ack;
 // symlink, hard-link and parent swaps after identify are refused, nothing is
 // opened, the victim is untouched and the sender reports the missing ack.
 func TestMarkdownRouteHandoff(t *testing.T) {
@@ -150,7 +150,7 @@ func TestMarkdownRouteHandoff(t *testing.T) {
 				opened = emulatedReviewrReceiver(t, args)
 			})
 			err := openHerdRFile(fx.a, 7, 3, false)
-			if len(argv) != 6 || argv[0] != fx.a || argv[1] != "7" || argv[2] != "3" || argv[3] != wantParent || argv[4] != wantFile {
+			if len(argv) != 7 || handoff.CheckNonce(argv[6]) != nil || argv[0] != fx.a || argv[1] != "7" || argv[2] != "3" || argv[3] != wantParent || argv[4] != wantFile {
 				t.Fatalf("helper argv = %q", argv)
 			}
 			if !strings.HasPrefix(filepath.Base(argv[5]), handoff.DirPrefix) {
@@ -181,7 +181,7 @@ func TestMarkdownRouteHandoff(t *testing.T) {
 func TestMarkdownRouteRealHelperProcess(t *testing.T) {
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "argv")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$#\" \"$@\" > \"$MARKER\"\n( sleep 0.1; : > \"$6/ack\" ) &\n"
+	script := "#!/bin/sh\nprintf '%s\\n' \"$#\" \"$@\" > \"$MARKER\"\n( sleep 0.1; printf '%s %s\\n' \"$7\" \"$5\" > \"$6/ack\" ) &\n"
 	if err := os.WriteFile(filepath.Join(dir, reviewMarkdownHelper), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,7 @@ func TestMarkdownRouteRealHelperProcess(t *testing.T) {
 	}
 	data, err := os.ReadFile(marker)
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if err != nil || len(lines) != 7 || lines[0] != "6" || lines[1] != fx.a || lines[2] != "2" || lines[3] != "1" {
+	if err != nil || len(lines) != 8 || lines[0] != "7" || lines[1] != fx.a || lines[2] != "2" || lines[3] != "1" {
 		t.Fatalf("helper argv = %q, %v", lines, err)
 	}
 }
@@ -219,11 +219,11 @@ func TestNonMarkdownLinkRouteHandoff(t *testing.T) {
 					command = args[3]
 					fx.swap(t, kind)
 					w := strings.Fields(command)
-					if len(w) != 12 || w[2] != "--single-file-at" || w[6] != "--expect-parent" || w[8] != "--expect-file" || w[10] != "--handoff" {
+					if len(w) != 14 || w[2] != "--single-file-at" || w[6] != "--expect-parent" || w[8] != "--expect-file" || w[10] != "--handoff" || w[12] != "--handoff-nonce" {
 						t.Fatalf("command = %q", command)
 					}
 					unq := func(s string) string { return strings.Trim(s, "'") }
-					tab, err := app.ReceiveHandoff(unq(w[3]), unq(w[7]), unq(w[9]), unq(w[11]))
+					tab, err := app.ReceiveHandoff(unq(w[3]), unq(w[7]), unq(w[9]), unq(w[11]), unq(w[13]))
 					if err == nil {
 						received = true
 						if tab.Buffer.String() != "AAA\n" {
@@ -267,22 +267,32 @@ func TestResolveArgsSingleFileAtRequiresTriple(t *testing.T) {
 	}
 	h := filepath.Join(dir, "handoff")
 	p, f := "2049:18446744073709551615", "18446744073709551615:7"
+	n := "00112233445566778899aabbccddeeff"
 	ok := [][]string{
-		{"--single-file-at", file, "3", "5", "--expect-parent", p, "--expect-file", f, "--handoff", h},
-		{"--single-file-at", file, "3", "5", "--handoff", h, "--expect-file", f, "--expect-parent", p},
-		{"--single-file-at", file, "3", "5", "--expect-file", f, "--handoff", h, "--expect-parent", p},
+		{"--single-file-at", file, "3", "5", "--expect-parent", p, "--expect-file", f, "--handoff", h, "--handoff-nonce", n},
+		{"--single-file-at", file, "3", "5", "--handoff", h, "--expect-file", f, "--expect-parent", p, "--handoff-nonce", n},
+		{"--single-file-at", file, "3", "5", "--expect-file", f, "--handoff", h, "--expect-parent", p, "--handoff-nonce", n},
 	}
 	for _, args := range ok {
 		got := resolveArgs(args)
 		if got.Err != nil || !got.Isolated || got.OpenFile != file || got.OpenLine != 3 || got.OpenCol != 5 ||
-			got.ExpectParent != p || got.ExpectFile != f || got.Handoff != h {
+			got.ExpectParent != p || got.ExpectFile != f || got.Handoff != h || got.HandoffNonce != n {
 			t.Fatalf("%q resolved to %+v", args, got)
 		}
 	}
 	base := []string{"--single-file-at", file, "3", "5"}
-	with := func(extra ...string) []string { return append(append([]string(nil), base...), extra...) }
+	raw := func(extra ...string) []string { return append(append([]string(nil), base...), extra...) }
+	with := func(extra ...string) []string { return append(raw(extra...), "--handoff-nonce", n) }
 	bad := [][]string{
 		base,
+		// The nonce is required, exactly once, as 32 lowercase hex digits.
+		raw("--expect-parent", p, "--expect-file", f, "--handoff", h),
+		with("--expect-parent", p, "--expect-file", f, "--handoff", h, "--handoff-nonce", n),
+		raw("--expect-parent", p, "--expect-file", f, "--handoff", h, "--handoff-nonce", ""),
+		raw("--expect-parent", p, "--expect-file", f, "--handoff", h, "--handoff-nonce", "00112233445566778899AABBCCDDEEFF"),
+		raw("--expect-parent", p, "--expect-file", f, "--handoff", h, "--handoff-nonce", n[:30]),
+		raw("--expect-parent", p, "--expect-file", f, "--handoff", h, "--handoff-nonce", n+"00"),
+		raw("--expect-parent", p, "--expect-file", f, "--handoff", h, "--handoff-nonce", "zz"+n[2:]),
 		with("--expect-parent", p, "--expect-file", f),
 		with("--expect-parent", p, "--handoff", h),
 		with("--expect-file", f, "--handoff", h),
@@ -297,10 +307,10 @@ func TestResolveArgsSingleFileAtRequiresTriple(t *testing.T) {
 		with("--expect-parent", p, "--expect-file", f, "--handoff", dir+"/./handoff"),
 		with("--expect-parent", p, "--expect-file", f, "--handoff", ""),
 		with("--expect", p, "--expect-file", f, "--handoff", h),
-		{"--single-file-at", dir + "/./target.go", "3", "5", "--expect-parent", p, "--expect-file", f, "--handoff", h},
-		{"--single-file-at", "target.go", "3", "5", "--expect-parent", p, "--expect-file", f, "--handoff", h},
-		{"--single-file-at", file + "/", "3", "5", "--expect-parent", p, "--expect-file", f, "--handoff", h},
-		{"--single-file-at", file, "0", "5", "--expect-parent", p, "--expect-file", f, "--handoff", h},
+		{"--single-file-at", dir + "/./target.go", "3", "5", "--expect-parent", p, "--expect-file", f, "--handoff", h, "--handoff-nonce", n},
+		{"--single-file-at", "target.go", "3", "5", "--expect-parent", p, "--expect-file", f, "--handoff", h, "--handoff-nonce", n},
+		{"--single-file-at", file + "/", "3", "5", "--expect-parent", p, "--expect-file", f, "--handoff", h, "--handoff-nonce", n},
+		{"--single-file-at", file, "0", "5", "--expect-parent", p, "--expect-file", f, "--handoff", h, "--handoff-nonce", n},
 		{"--single-file-at", file, "--expect-parent", p, "--expect-file", f, "--handoff", h, "3", "5"},
 		{"--handoff", h},
 		{file, "--handoff", h},
@@ -327,7 +337,7 @@ func TestResolveArgsSingleFileAtDoesNotResolveFile(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
-	got := resolveArgs([]string{"--single-file-at", link, "1", "1", "--expect-parent", "1:2", "--expect-file", "3:4", "--handoff", filepath.Join(dir, "h")})
+	got := resolveArgs([]string{"--single-file-at", link, "1", "1", "--expect-parent", "1:2", "--expect-file", "3:4", "--handoff", filepath.Join(dir, "h"), "--handoff-nonce", "00112233445566778899aabbccddeeff"})
 	if got.Err != nil || got.OpenFile != link {
 		t.Fatalf("parser resolved or refused FILE: %+v", got)
 	}

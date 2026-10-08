@@ -25,7 +25,7 @@ index 6add628..6013362 100644
  tempfile = "3"
  
 diff --git a/src/app.rs b/src/app.rs
-index 49829b8..acb4ef6 100644
+index 49829b8..60aaa66 100644
 --- a/src/app.rs
 +++ b/src/app.rs
 @@ -8,7 +8,7 @@
@@ -339,7 +339,7 @@ index 49829b8..acb4ef6 100644
              self.clamp_list_cursor();
              self.status = "comment deleted".to_string();
              // Don't strand the user in an empty "Comments (0)" overlay, matching `export`.
-@@ -2982,6 +3135,96 @@ impl App {
+@@ -2982,6 +3135,98 @@ impl App {
          }
      }
  
@@ -410,6 +410,8 @@ index 49829b8..acb4ef6 100644
 +                .arg(parent_id)
 +                .arg(held.id())
 +                .arg(handoff.path())
++                // The nonce reaches the receiver only through this argv (never HANDOFF).
++                .arg(handoff.nonce())
 +                .output()
 +                .context("launching original editor");
 +            let outcome = match launched {
@@ -418,7 +420,7 @@ index 49829b8..acb4ef6 100644
 +                    "original editor failed: {}",
 +                    String::from_utf8_lossy(&output.stderr).trim()
 +                )),
-+                Ok(_) if handoff.wait_for_ack(ack_timeout) => Ok(()),
++                Ok(_) if handoff.wait_for_ack(ack_timeout, &held) => Ok(()),
 +                Ok(_) => Err(anyhow::anyhow!("the editor did not confirm it opened the file")),
 +            };
 +            // ALWAYS: invalidate HANDOFF, then release the original, then remove it.
@@ -436,7 +438,7 @@ index 49829b8..acb4ef6 100644
      // --- Search overlay (specs/search.md) ------------------------------------------------
  
      /// The active scope's annotation for `path` — the search overlay's file rows wear the
-@@ -2992,6 +3235,9 @@ impl App {
+@@ -2992,6 +3237,9 @@ impl App {
  
      /// `/`: open the search screen, from any tab, from either pane (specs/search.md).
      pub fn open_search(&mut self) {
@@ -446,7 +448,7 @@ index 49829b8..acb4ef6 100644
          // A navigator-divider drag held from the review view must not become a search-split
          // resize: cancel it so its remaining drag events are consumed, not acted on — the
          // search divider only drags a gesture it started itself (specs/input.md).
-@@ -3275,6 +3521,9 @@ impl App {
+@@ -3275,6 +3523,9 @@ impl App {
      /// pick lands the cursor on its line, clamped into the file's current length. A
      /// vanished path opens nothing and the screen stays (specs/search.md).
      pub fn search_open_pick(&mut self) -> Result<()> {
@@ -456,7 +458,7 @@ index 49829b8..acb4ef6 100644
          let Some(s) = self.search.as_ref() else { return Ok(()) };
          // Off `Ready`, the painted screen shows no rows — held results are stale and
          // invisible, so nothing opens (specs/search.md).
-@@ -3554,6 +3803,20 @@ impl App {
+@@ -3554,6 +3805,20 @@ impl App {
              out.push((A::MoveFile, Move));
              out.push((A::MovePage, Move));
          }
@@ -477,7 +479,7 @@ index 49829b8..acb4ef6 100644
          out
      }
  
-@@ -3643,7 +3906,10 @@ impl App {
+@@ -3643,7 +3908,10 @@ impl App {
      /// `--base` flag (`specs/input.md` Base picker).
      #[must_use]
      pub fn base_pick_available(&self) -> bool {
@@ -489,7 +491,7 @@ index 49829b8..acb4ef6 100644
      }
  
      /// Open the base picker: one row per branch name, the open PR's target starred first,
-@@ -3765,7 +4031,9 @@ impl App {
+@@ -3765,7 +4033,9 @@ impl App {
          logln!("export ({n}) -> {} ::\n{text}", target.label());
          let delivered = match target.export(&text) {
              Ok(()) => {
@@ -500,7 +502,7 @@ index 49829b8..acb4ef6 100644
                  self.status = target.success_message(n);
                  logln!("export OK");
                  true
-@@ -3923,6 +4191,11 @@ fn hunk_row(rows: &[Row], from: Option<usize>, forward: bool) -> Option<usize> {
+@@ -3923,6 +4193,11 @@ fn hunk_row(rows: &[Row], from: Option<usize>, forward: bool) -> Option<usize> {
      }
  }
  
@@ -512,7 +514,7 @@ index 49829b8..acb4ef6 100644
  /// Whether `path` names a markdown file: a `.md`/`.markdown` extension,
  /// case-insensitive (specs/diff-view.md).
  fn is_markdown_path(path: &str) -> bool {
-@@ -4166,6 +4439,785 @@ mod tests {
+@@ -4166,6 +4441,854 @@ mod tests {
          assert_eq!(recovered.focus, crate::Focus::Diff, "and focus lands on the read pane");
      }
  
@@ -896,8 +898,7 @@ index 49829b8..acb4ef6 100644
 +
 +    /// A helper that records argv and acknowledges the handoff like a real receiver.
 +    #[cfg(unix)]
-+    const ACKING_HELPER: &str =
-+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\n[ -d \"$6\" ] && : > \"$6/ack\"\nexit 0\n";
++    const ACKING_HELPER: &str = "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\n[ -d \"$6\" ] && printf '%s %s\\n' \"$7\" \"$5\" > \"$6/ack\"\nexit 0\n";
 +
 +    /// FILE LINE COL PARENT_ID FILE_ID of a recorded argv (HANDOFF is per launch).
 +    #[cfg(unix)]
@@ -1050,7 +1051,7 @@ index 49829b8..acb4ef6 100644
 +        );
 +    }
 +
-+    /// Contract v3: the helper receives exactly FILE LINE 1 PARENT_ID FILE_ID HANDOFF, where
++    /// Contract v3: the helper receives exactly FILE LINE 1 PARENT_ID FILE_ID HANDOFF NONCE, where
 +    /// FILE is the unchanged canonical original and FILE_ID is that entry's own identity.
 +    #[cfg(unix)]
 +    #[test]
@@ -1065,7 +1066,12 @@ index 49829b8..acb4ef6 100644
 +        assert_eq!(canonical, path, "FILE is the reviewed spelling, not a resolution");
 +        let recorded = std::fs::read_to_string(&args).unwrap();
 +        let argv: Vec<&str> = recorded.lines().collect();
-+        assert_eq!(argv.len(), 6, "exactly FILE LINE COL PARENT_ID FILE_ID HANDOFF: {argv:?}");
++        assert_eq!(
++            argv.len(),
++            7,
++            "exactly FILE LINE COL PARENT_ID FILE_ID HANDOFF NONCE: {argv:?}"
++        );
++        assert!(crate::config::is_nonce(argv[6]), "NONCE is 32 lowercase hex: {argv:?}");
 +        assert_eq!(argv[0], canonical.to_str().unwrap());
 +        assert_eq!(argv[1], "1");
 +        assert_eq!(argv[2], "1");
@@ -1096,7 +1102,7 @@ index 49829b8..acb4ef6 100644
 +        std::env::temp_dir().components().collect()
 +    }
 +
-+    /// Contract v3: argv is exactly FILE LINE 1 PARENT_ID FILE_ID HANDOFF; HANDOFF is a
++    /// Contract v3: argv is exactly FILE LINE 1 PARENT_ID FILE_ID HANDOFF NONCE; HANDOFF is a
 +    /// fresh private `explorr-handoff-*` directory under the temp dir, the ack is
 +    /// awaited, and afterwards neither HANDOFF nor `HANDOFF.closed` remains.
 +    #[cfg(unix)]
@@ -1107,12 +1113,17 @@ index 49829b8..acb4ef6 100644
 +        let helper = script_helper(
 +            root.path(),
 +            "acking-helper",
-+            r#"printf '%s\n' "$@" > "$0.args"; ls -ld "$6" | cut -c1-10 > "$0.mode"; : > "$6/ack""#,
++            r#"printf '%s\n' "$@" > "$0.args"; ls -ld "$6" | cut -c1-10 > "$0.mode"; printf '%s %s\n' "$7" "$5" > "$6/ack""#,
 +        );
 +        launch_recording_helper(&mut app, &helper);
 +        let recorded = std::fs::read_to_string(root.path().join("acking-helper.args")).unwrap();
 +        let argv: Vec<&str> = recorded.lines().collect();
-+        assert_eq!(argv.len(), 6, "exactly FILE LINE COL PARENT_ID FILE_ID HANDOFF: {argv:?}");
++        assert_eq!(
++            argv.len(),
++            7,
++            "exactly FILE LINE COL PARENT_ID FILE_ID HANDOFF NONCE: {argv:?}"
++        );
++        assert!(crate::config::is_nonce(argv[6]), "NONCE is 32 lowercase hex: {argv:?}");
 +        assert_eq!(argv[0], path.to_str().unwrap());
 +        assert_eq!(argv[1], "1");
 +        assert_eq!(argv[2], "1");
@@ -1141,7 +1152,7 @@ index 49829b8..acb4ef6 100644
 +        let helper = script_helper(
 +            root.path(),
 +            "silent-helper",
-+            r#"printf '%s\n' "$@" > "$0.args"; (sleep 0.6; touch "$6/ack"; echo $? > "$0.late") >/dev/null 2>&1 &"#,
++            r#"printf '%s\n' "$@" > "$0.args"; (sleep 0.6; printf '%s %s\n' "$7" "$5" > "$6/ack"; echo $? > "$0.late") >/dev/null 2>&1 &"#,
 +        );
 +        let started = std::time::Instant::now();
 +        let error = loop {
@@ -1206,19 +1217,46 @@ index 49829b8..acb4ef6 100644
 +        assert!(!PathBuf::from(format!("{}.closed", handoff.display())).exists());
 +    }
 +
++    /// Run Edit original until it fails for a reason other than a busy helper binary.
++    #[cfg(unix)]
++    fn edit_original_error(app: &mut App, helper: &std::path::Path) -> String {
++        loop {
++            match app.edit_original_with(helper.as_os_str()) {
++                Err(error)
++                    if error.chain().any(|cause| {
++                        cause
++                            .downcast_ref::<std::io::Error>()
++                            .is_some_and(|io| io.kind() == std::io::ErrorKind::ExecutableFileBusy)
++                    }) =>
++                {
++                    std::thread::sleep(std::time::Duration::from_millis(10));
++                }
++                Err(error) => break format!("{error:#}"),
++                Ok(()) => panic!("an unconfirmed launch must fail"),
++            }
++        }
++    }
++
 +    /// The security-1153 round-4 P2, end to end: inside the handoff window (after
 +    /// identification, before the receiver binds) A is unlinked and recreated. The
-+    /// sender still holds the identified inode, so the new A can never reuse FILE_ID.
++    /// sender still holds the identified inode, so the new A can never reuse FILE_ID;
++    /// and a receiver that bound the replacement acks ITS `DEV:INO`, which the sender
++    /// rejects (round-5 P2) even though the nonce is right.
 +    #[cfg(unix)]
 +    #[test]
 +    fn edit_original_holds_identified_inode_across_the_handoff_window() {
 +        let (root, path, mut app) = replaced_parent_fixture();
++        app.handoff_ack_timeout = std::time::Duration::from_millis(150);
 +        let helper = script_helper(
 +            root.path(),
 +            "racing-helper",
-+            r#"printf '%s\n' "$@" > "$0.args"; unlink "$1"; printf 'new\n' > "$1"; ls -i "$1" > "$0.ino"; [ -d "$6" ] && : > "$6/ack"; exit 0"#,
++            r#"printf '%s\n' "$@" > "$0.args"; unlink "$1"; printf 'new\n' > "$1"; ls -i "$1" > "$0.ino"; id=$(stat -c '%d:%i' "$1" 2>/dev/null || stat -f '%d:%i' "$1"); [ -d "$6" ] && printf '%s %s\n' "$7" "$id" > "$6/ack"; exit 0"#,
 +        );
-+        launch_recording_helper(&mut app, &helper);
++        assert_eq!(
++            edit_original_error(&mut app, &helper),
++            "the editor did not confirm it opened the file",
++            "an ack for the replacement inode is no confirmation"
++        );
 +        let recorded = std::fs::read_to_string(root.path().join("racing-helper.args")).unwrap();
 +        let argv: Vec<&str> = recorded.lines().collect();
 +        let held_ino = argv[4].split_once(':').unwrap().1;
@@ -1226,6 +1264,39 @@ index 49829b8..acb4ef6 100644
 +        let new_ino = ls.split_whitespace().next().unwrap();
 +        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\n");
 +        assert_ne!(new_ino, held_ino, "the recreated A reused the identified FILE_ID");
++    }
++
++    /// The round-5 P2: a same-UID process that learned HANDOFF pre-creates `ack` (a bare
++    /// marker, or one with a guessed nonce) before the real receiver. Without this
++    /// handoff's nonce bound to the held original's `DEV:INO` it is no confirmation: the
++    /// sender waits out the timeout and reports the contract's error.
++    #[cfg(unix)]
++    #[test]
++    fn edit_original_rejects_a_preplanted_or_wrong_nonce_ack() {
++        for (name, plant) in [
++            ("marker", r#": > "$6/ack""#),
++            ("file id only", r#"printf '%s\n' "$5" > "$6/ack""#),
++            ("wrong nonce", r#"printf 'ffeeddccbbaa99887766554433221100 %s\n' "$5" > "$6/ack""#),
++        ] {
++            let (root, _path, mut app) = replaced_parent_fixture();
++            app.handoff_ack_timeout = std::time::Duration::from_millis(150);
++            let helper = script_helper(
++                root.path(),
++                "planting-helper",
++                &format!(r#"printf '%s\n' "$@" > "$0.args"; {plant}; exit 0"#),
++            );
++            let started = std::time::Instant::now();
++            assert_eq!(
++                edit_original_error(&mut app, &helper),
++                "the editor did not confirm it opened the file",
++                "{name}"
++            );
++            assert!(started.elapsed() >= std::time::Duration::from_millis(150), "{name}");
++            let recorded =
++                std::fs::read_to_string(root.path().join("planting-helper.args")).unwrap();
++            let handoff = PathBuf::from(recorded.lines().nth(5).unwrap());
++            assert!(!handoff.exists(), "{name}: HANDOFF invalidated and removed");
++        }
 +    }
 +
 +    /// The security-1153 P2: the reviewed `A.md` replaced, inside the SAME held parent,
@@ -1299,25 +1370,26 @@ index 49829b8..acb4ef6 100644
      fn blocked_app_rejects_normal_repository_work_without_panicking() {
          let mut app = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
 diff --git a/src/config.rs b/src/config.rs
-index 39baa9a..ff5b146 100644
+index 39baa9a..0585e3c 100644
 --- a/src/config.rs
 +++ b/src/config.rs
-@@ -12,6 +12,14 @@ use std::time::Duration;
+@@ -12,6 +12,15 @@ use std::time::Duration;
  #[derive(Clone, Debug)]
  pub struct Config {
      pub repo: PathBuf,
 +    /// The canonical regular file selected explicitly by `--file` (never a repo fallback).
 +    /// With a [`Handoff`] it is instead the sender's exact, unresolved spelling.
 +    pub document: Option<PathBuf>,
-+    /// The sender's identities and handoff directory (handoff contract v3), present only
-+    /// when `--expect-parent`, `--expect-file` and `--handoff` were all given.
++    /// The sender's identities, handoff directory and nonce (handoff contract v3), present
++    /// only when `--expect-parent`, `--expect-file`, `--handoff` and `--handoff-nonce`
++    /// were all given.
 +    pub handoff: Option<Handoff>,
 +    /// One-based initial source line; defaults to 1.
 +    pub document_line: u32,
      pub poll: Duration,
      pub base: Option<String>,
      pub theme: Option<String>,
-@@ -22,13 +30,70 @@ pub struct Config {
+@@ -22,13 +31,79 @@ pub struct Config {
      pub plugin_config_dir: Option<PathBuf>,
  }
  
@@ -1331,6 +1403,14 @@ index 39baa9a..ff5b146 100644
 +    pub file: String,
 +    /// The sender's private per-launch directory; `ack` is created inside it.
 +    pub dir: PathBuf,
++    /// The sender's per-handoff 128-bit secret (32 lowercase hex digits), received only
++    /// through this argv. The ack carries it with the bound file's `DEV:INO`.
++    pub nonce: String,
++}
++
++/// The handoff nonce grammar: exactly 32 lowercase hex digits (128 bits).
++pub(crate) fn is_nonce(value: &str) -> bool {
++    value.len() == 32 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 +}
 +
 +/// The contract's identity grammar `^[0-9]+:[0-9]+$`, each half an unsigned 64-bit value.
@@ -1374,7 +1454,7 @@ index 39baa9a..ff5b146 100644
      /// `--theme <name>`, and `--wrap on|off`; the first non-flag token is the repo path.
 -    pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Self {
 +    /// `--file <absolute-path>` opens exactly one regular file, with optional `--line <positive>`.
-+    /// `--expect-parent DEV:INO --expect-file DEV:INO --handoff DIR` (all or none, each
++    /// `--expect-parent DEV:INO --expect-file DEV:INO --handoff DIR --handoff-nonce HEX` (all or none, each
 +    /// once, only with `--file`) select handoff mode: FILE is then never canonicalized and
 +    /// must already be absolute and normalized; the document binding checks the rest.
 +    /// Invalid document arguments fail before terminal setup instead of choosing a repository.
@@ -1384,12 +1464,13 @@ index 39baa9a..ff5b146 100644
 +        let mut expect_parent: Option<String> = None;
 +        let mut expect_file: Option<String> = None;
 +        let mut handoff_dir: Option<String> = None;
++        let mut handoff_nonce: Option<String> = None;
 +        let mut document_line = 1;
 +        let mut line_given = false;
          let mut poll_ms: u64 = 2000;
          let mut base: Option<String> = None;
          let mut theme: Option<String> = None;
-@@ -36,6 +101,57 @@ impl Config {
+@@ -36,6 +111,64 @@ impl Config {
          let mut it = args.into_iter();
          while let Some(arg) = it.next() {
              match arg.as_str() {
@@ -1429,6 +1510,13 @@ index 39baa9a..ff5b146 100644
 +                    normalized_absolute,
 +                    "an absolute normalized directory path",
 +                )?,
++                "--handoff-nonce" => handoff_value(
++                    &mut handoff_nonce,
++                    "--handoff-nonce",
++                    it.next(),
++                    is_nonce,
++                    "32 lowercase hex digits",
++                )?,
 +                "--line" => {
 +                    anyhow::ensure!(!line_given, "--line may only be supplied once");
 +                    line_given = true;
@@ -1447,22 +1535,22 @@ index 39baa9a..ff5b146 100644
                  "--poll" => {
                      if let Some(v) = it.next() {
                          poll_ms = v.parse().unwrap_or(poll_ms);
-@@ -48,20 +164,64 @@ impl Config {
+@@ -48,20 +181,64 @@ impl Config {
                  _ => {}
              }
          }
-+        let handoff = match (expect_parent, expect_file, handoff_dir) {
-+            (None, None, None) => None,
-+            (Some(parent), Some(file), Some(dir)) => {
-+                Some(Handoff { parent, file, dir: PathBuf::from(dir) })
++        let handoff = match (expect_parent, expect_file, handoff_dir, handoff_nonce) {
++            (None, None, None, None) => None,
++            (Some(parent), Some(file), Some(dir), Some(nonce)) => {
++                Some(Handoff { parent, file, dir: PathBuf::from(dir), nonce })
 +            }
 +            _ => anyhow::bail!(
-+                "--expect-parent, --expect-file and --handoff must be supplied together"
++                "--expect-parent, --expect-file, --handoff and --handoff-nonce must be supplied together"
 +            ),
 +        };
 +        anyhow::ensure!(
 +            handoff.is_none() || file.is_some(),
-+            "--expect-parent, --expect-file and --handoff require --file"
++            "--expect-parent, --expect-file, --handoff and --handoff-nonce require --file"
 +        );
 +        let document = match file {
 +            None => None,
@@ -1516,7 +1604,7 @@ index 39baa9a..ff5b146 100644
          Self::parse(std::env::args().skip(1))
      }
  }
-@@ -605,7 +765,7 @@ mod tests {
+@@ -605,7 +782,7 @@ mod tests {
      use std::time::Duration;
  
      fn parse(args: &[&str]) -> Config {
@@ -1525,7 +1613,7 @@ index 39baa9a..ff5b146 100644
      }
  
      #[test]
-@@ -615,6 +775,173 @@ mod tests {
+@@ -615,6 +792,199 @@ mod tests {
          assert_eq!(c.base, None);
      }
  
@@ -1584,7 +1672,17 @@ index 39baa9a..ff5b146 100644
 +        let file = file.to_str().unwrap();
 +        let handoff = root.join("explorr-handoff-x");
 +        let handoff = handoff.to_str().unwrap();
-+        let triple = ["--expect-parent", "1:2", "--expect-file", "3:4", "--handoff", handoff];
++        let nonce = "00112233445566778899aabbccddeeff";
++        let triple = [
++            "--expect-parent",
++            "1:2",
++            "--expect-file",
++            "3:4",
++            "--handoff",
++            handoff,
++            "--handoff-nonce",
++            nonce,
++        ];
 +        let ok = |args: &[&str]| Config::parse(args.iter().map(|s| (*s).to_string()));
 +        let mut full = vec!["--file", file];
 +        full.extend(triple);
@@ -1595,6 +1693,7 @@ index 39baa9a..ff5b146 100644
 +                parent: "1:2".into(),
 +                file: "3:4".into(),
 +                dir: std::path::PathBuf::from(handoff),
++                nonce: nonce.into(),
 +            })
 +        );
 +        assert_eq!(parsed.document.as_deref(), Some(std::path::Path::new(file)));
@@ -1619,11 +1718,13 @@ index 39baa9a..ff5b146 100644
 +            file,
 +            "--expect-parent",
 +            "1:2",
++            "--handoff-nonce",
++            nonce,
 +        ];
 +        assert!(ok(&reordered).is_ok());
 +        let mut cases: Vec<Vec<&str>> = Vec::new();
 +        // Every partial subset of the triple.
-+        for mask in 1..7_u8 {
++        for mask in 1..15_u8 {
 +            let mut args = vec!["--file", file];
 +            for (i, pair) in triple.chunks(2).enumerate() {
 +                if mask & (1 << i) != 0 {
@@ -1633,9 +1734,12 @@ index 39baa9a..ff5b146 100644
 +            cases.push(args);
 +        }
 +        // Duplicates, missing values, malformed identities and handoffs.
-+        for (flag, value) in
-+            [("--expect-parent", "1:2"), ("--expect-file", "3:4"), ("--handoff", handoff)]
-+        {
++        for (flag, value) in [
++            ("--expect-parent", "1:2"),
++            ("--expect-file", "3:4"),
++            ("--handoff", handoff),
++            ("--handoff-nonce", nonce),
++        ] {
 +            let mut args = full.clone();
 +            args.extend([flag, value]);
 +            cases.push(args);
@@ -1654,6 +1758,16 @@ index 39baa9a..ff5b146 100644
 +                args[position + 1] = bad;
 +                cases.push(args);
 +            }
++        }
++        // Malformed nonces: wrong length, uppercase, non-hex.
++        let long_nonce = format!("{nonce}00");
++        let upper_nonce = nonce.to_uppercase();
++        for bad in ["", &nonce[..30], &long_nonce, &upper_nonce, "zz112233445566778899aabbccddeeff"]
++        {
++            let mut args = full.clone();
++            let position = args.iter().position(|arg| *arg == "--handoff-nonce").unwrap();
++            args[position + 1] = bad;
++            assert!(Config::parse(args.iter().map(|s| (*s).to_string())).is_err(), "{args:?}");
 +        }
 +        let relative = "explorr-handoff-x";
 +        let dotted = format!("{}/./explorr-handoff-x", root.display());
@@ -1701,10 +1815,10 @@ index 39baa9a..ff5b146 100644
          let c = parse(&["--poll", "500", "--base", "origin/dev", "/tmp/work"]);
 diff --git a/src/document.rs b/src/document.rs
 new file mode 100644
-index 0000000..bf973bd
+index 0000000..f41d768
 --- /dev/null
 +++ b/src/document.rs
-@@ -0,0 +1,1610 @@
+@@ -0,0 +1,1775 @@
 +//! Single-document comment snapshots, separate from the git review model.
 +//!
 +//! The approved document-mode contract persists the seven fields in
@@ -1729,12 +1843,14 @@ index 0000000..bf973bd
 +    use rustix::io::Errno;
 +    use serde::{Deserialize, Serialize};
 +
-+    use crate::config::{Handoff, normalized_absolute};
++    use crate::config::{Handoff, is_nonce, normalized_absolute};
 +    use crate::model::{Comment, CommentStore};
 +
 +    const SCHEMA_VERSION: u32 = 1;
 +    /// Handoff contract v3: the sender polls for `HANDOFF/ack` this often.
 +    const ACK_POLL: Duration = Duration::from_millis(20);
++    /// The most of an ack the sender reads; a valid one is far shorter.
++    const MAX_ACK: u64 = 256;
 +    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 +
 +    /// A canonical regular original and its single-writer sidecar lease.
@@ -1758,7 +1874,7 @@ index 0000000..bf973bd
 +    /// acknowledged: no inode can be reused while any descriptor still references it.
 +    #[derive(Debug)]
 +    pub struct HeldOriginal {
-+        _file: File,
++        file: File,
 +        id: String,
 +    }
 +
@@ -1767,14 +1883,64 @@ index 0000000..bf973bd
 +        pub fn id(&self) -> &str {
 +            &self.id
 +        }
++
++        /// The held descriptor's `DEV:INO` right now (fstat), for ack validation.
++        fn current_id(&self) -> Result<String> {
++            Ok(format_parent_id(&rfs::fstat(&self.file).context("inspect held original")?))
++        }
 +    }
 +
 +    /// The sender's private per-launch handoff directory (contract v3). It is only ever
 +    /// closed through [`HandoffDir::close`], which invalidates it before releasing the
-+    /// held original and then removes it.
++    /// held original and then removes it. `nonce` is this handoff's 128-bit secret: it
++    /// is passed to the receiver ONLY in its argv (never written into the directory),
++    /// and the receiver's ack must carry it with the bound file's `DEV:INO`.
 +    #[derive(Debug)]
 +    pub struct HandoffDir {
 +        path: PathBuf,
++        nonce: String,
++    }
++
++    /// The receiver-authenticated ack body: the sender's nonce and the receiver's bound
++    /// file `DEV:INO`, exactly as Explorr's `handoff.AckContent` spells it.
++    pub(crate) fn ack_content(nonce: &str, file_id: &str) -> String {
++        format!("{nonce} {file_id}\n")
++    }
++
++    /// A fresh 128-bit nonce from the OS CSPRNG, as 32 lowercase hex digits.
++    fn fresh_nonce() -> Result<String> {
++        let mut raw = [0_u8; 16];
++        File::open("/dev/urandom")
++            .and_then(|mut random| random.read_exact(&mut raw))
++            .context("read handoff nonce from /dev/urandom")?;
++        Ok(raw.iter().fold(String::with_capacity(32), |mut hex, byte| {
++            use std::fmt::Write as _;
++            let _ = write!(hex, "{byte:02x}");
++            hex
++        }))
++    }
++
++    /// Compare without an early exit on the first differing byte.
++    fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
++        left.len() == right.len()
++            && left.iter().zip(right).fold(0_u8, |acc, (a, b)| acc | (a ^ b)) == 0
++    }
++
++    /// Read `ack` no-follow and non-blocking (a planted symlink or FIFO is refused, never
++    /// followed or waited on), require a regular file, and return at most `MAX_ACK + 1` bytes.
++    fn read_ack(ack: &Path) -> Result<Vec<u8>> {
++        let fd = rfs::open(
++            ack,
++            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
++            Mode::empty(),
++        )?;
++        let file = File::from(fd);
++        if FileType::from_raw_mode(rfs::fstat(&file)?.st_mode) != FileType::RegularFile {
++            bail!("ack is not a regular file");
++        }
++        let mut body = Vec::new();
++        file.take(MAX_ACK + 1).read_to_end(&mut body)?;
++        Ok(body)
 +    }
 +
 +    /// Only the agreed canonical snapshot fields are accepted or emitted.
@@ -1947,7 +2113,7 @@ index 0000000..bf973bd
 +                bail!("refusing non-regular original: {}", self.path.display());
 +            }
 +            check_opened_entry(&self.directory, &self.path, &file)?;
-+            Ok(HeldOriginal { id: format_parent_id(&stat), _file: file })
++            Ok(HeldOriginal { id: format_parent_id(&stat), file })
 +        }
 +
 +        /// Permit atomic replacement of the original, but never a different parent,
@@ -1992,7 +2158,15 @@ index 0000000..bf973bd
 +                    bail!("temporary directory is not absolute and normalized: {}", root.display());
 +                }
 +                match std::fs::DirBuilder::new().mode(0o700).create(&path) {
-+                    Ok(()) => return Ok(Self { path }),
++                    Ok(()) => {
++                        return match fresh_nonce() {
++                            Ok(nonce) => Ok(Self { path, nonce }),
++                            Err(error) => {
++                                let _ = std::fs::remove_dir(&path);
++                                Err(error)
++                            }
++                        };
++                    }
 +                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
 +                    Err(error) => {
 +                        return Err(error)
@@ -2008,12 +2182,30 @@ index 0000000..bf973bd
 +            &self.path
 +        }
 +
-+        /// Poll for the receiver's `ack` every 20 ms until `timeout`; true once it exists.
-+        pub fn wait_for_ack(&self, timeout: Duration) -> bool {
-+            let ack = self.path.join("ack");
++        /// This handoff's nonce, passed to the receiver's argv as `--handoff-nonce`.
++        pub fn nonce(&self) -> &str {
++            &self.nonce
++        }
++
++        /// Whether `ack` is exactly [`ack_content`] of this handoff's nonce and the
++        /// fstat `DEV:INO` of the descriptor `held` still holds (which must also be the
++        /// `FILE_ID` passed to the launch). A pre-created marker, a wrong nonce, another
++        /// inode, a symlink or a FIFO is never valid.
++        fn valid_ack(&self, held: &HeldOriginal) -> bool {
++            let Ok(current) = held.current_id() else { return false };
++            if current != held.id() {
++                return false;
++            }
++            let Ok(body) = read_ack(&self.path.join("ack")) else { return false };
++            constant_time_eq(&body, ack_content(&self.nonce, &current).as_bytes())
++        }
++
++        /// Poll every 20 ms until `timeout` for a VALID receiver ack (see `valid_ack`);
++        /// an invalid one is treated exactly like none, so the timeout path applies.
++        pub fn wait_for_ack(&self, timeout: Duration, held: &HeldOriginal) -> bool {
 +            let deadline = Instant::now() + timeout;
 +            loop {
-+                if std::fs::symlink_metadata(&ack).is_ok_and(|meta| meta.file_type().is_file()) {
++                if self.valid_ack(held) {
 +                    return true;
 +                }
 +                let now = Instant::now();
@@ -2093,13 +2285,18 @@ index 0000000..bf973bd
 +            );
 +        }
 +        check_opened_entry(&directory, path, &original)?;
-+        acknowledge(&handoff.dir)?;
++        acknowledge(&handoff.dir, &handoff.nonce, &file_id)?;
 +        Ok((directory, original))
 +    }
 +
-+    /// Create `HANDOFF/ack` (O_CREAT|O_EXCL|O_WRONLY, 0600) by path, only in a private
-+    /// real directory. An invalidated (renamed) HANDOFF or an existing ack refuses.
-+    fn acknowledge(handoff: &Path) -> Result<()> {
++    /// Create `HANDOFF/ack` (`O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW`, 0600) by path, only in a
++    /// private real directory, containing [`ack_content`] of the nonce from our argv and
++    /// the `DEV:INO` of the file we bound. An invalidated (renamed) HANDOFF or an
++    /// existing (possibly planted) ack refuses.
++    fn acknowledge(handoff: &Path, nonce: &str, bound_file_id: &str) -> Result<()> {
++        if !is_nonce(nonce) {
++            bail!("handoff nonce must be 32 lowercase hex digits");
++        }
 +        let meta = std::fs::symlink_metadata(handoff)
 +            .with_context(|| format!("handoff unavailable: {}", handoff.display()))?;
 +        if !meta.file_type().is_dir() {
@@ -2119,7 +2316,10 @@ index 0000000..bf973bd
 +        if created.st_uid != meta.uid() {
 +            bail!("handoff directory is not owned by this user: {}", handoff.display());
 +        }
-+        Ok(())
++        // One write: the sender rejects a partial ack and keeps polling.
++        File::from(fd)
++            .write_all(ack_content(nonce, bound_file_id).as_bytes())
++            .with_context(|| format!("acknowledge handoff {}", ack.display()))
 +    }
 +
 +    /// Append to the entire filename, including its extension and non-UTF-8 spelling.
@@ -3158,6 +3358,7 @@ index 0000000..bf973bd
 +            assert_ne!(other.path(), handoff.path(), "fresh per launch");
 +            let held = document.file_id().unwrap();
 +            let held_id = held.id().to_owned();
++            let nonce = handoff.nonce().to_owned();
 +            let spelled = handoff.path().to_path_buf();
 +            let mut observed = false;
 +            handoff
@@ -3165,7 +3366,10 @@ index 0000000..bf973bd
 +                    observed = true;
 +                    assert!(!spelled.exists(), "HANDOFF invalidated first");
 +                    assert!(closed.is_dir());
-+                    assert!(acknowledge(&spelled).is_err(), "ack by path now fails");
++                    assert!(
++                        acknowledge(&spelled, &nonce, &held_id).is_err(),
++                        "ack by path now fails"
++                    );
 +                    fs::remove_file(&path).unwrap();
 +                    fs::write(&path, b"racer").unwrap();
 +                    let meta = fs::symlink_metadata(&path).unwrap();
@@ -3201,6 +3405,76 @@ index 0000000..bf973bd
 +            assert!(format!("{error:#}").contains("invalidate handoff"), "{error:#}");
 +            assert!(!spelled.exists(), "HANDOFF removed even though rename failed");
 +            assert_eq!(fs::read(&squatter).unwrap(), b"not ours");
++        }
++
++        /// The forged-ack P2: `wait_for_ack` accepts only the receiver-authenticated ack,
++        /// `NONCE DEV:INO` of this handoff's nonce and the held original. A pre-created
++        /// marker, a missing or wrong nonce, another inode, trailing bytes, a symlink or a
++        /// directory are treated exactly like no ack (the full timeout), and the genuine
++        /// receiver's exclusive ack then fails closed.
++        #[test]
++        fn wait_for_ack_requires_the_nonce_bound_to_the_held_inode() {
++            use std::os::unix::fs::MetadataExt;
++            type Plant = fn(&Path, &str, &str, &str);
++            let dir = tempfile::tempdir().unwrap();
++            let path = original(dir.path());
++            let (document, _) = Document::open(&path).unwrap();
++            let root = dir.path().canonicalize().unwrap();
++            let other = root.join("other.md");
++            fs::write(&other, b"other").unwrap();
++            let other_meta = fs::symlink_metadata(&other).unwrap();
++            let other_id = format!("{}:{}", other_meta.dev(), other_meta.ino());
++            let short = Duration::from_millis(60);
++            let cases: [(&str, Plant); 7] = [
++                ("empty marker", |ack, _, _, _| fs::write(ack, b"").unwrap()),
++                ("no nonce", |ack, _, id, _| fs::write(ack, format!("{id}\n")).unwrap()),
++                ("wrong nonce", |ack, _, id, _| {
++                    fs::write(ack, ack_content("ffeeddccbbaa99887766554433221100", id)).unwrap();
++                }),
++                ("right nonce, wrong dev:ino", |ack, nonce, _, other| {
++                    fs::write(ack, ack_content(nonce, other)).unwrap();
++                }),
++                ("trailing bytes", |ack, nonce, id, _| {
++                    fs::write(ack, format!("{}x", ack_content(nonce, id))).unwrap();
++                }),
++                ("symlink to a valid ack", |ack, nonce, id, _| {
++                    let elsewhere = ack.with_file_name("elsewhere");
++                    fs::write(&elsewhere, ack_content(nonce, id)).unwrap();
++                    std::os::unix::fs::symlink(&elsewhere, ack).unwrap();
++                }),
++                ("directory", |ack, _, _, _| fs::create_dir(ack).unwrap()),
++            ];
++            for (name, plant) in cases {
++                let handoff = HandoffDir::create_in(&root).unwrap();
++                let held = document.file_id().unwrap();
++                plant(&handoff.path().join("ack"), handoff.nonce(), held.id(), &other_id);
++                let start = Instant::now();
++                assert!(!handoff.wait_for_ack(short, &held), "{name} accepted");
++                assert!(start.elapsed() >= short, "{name} ended the wait early");
++                assert!(
++                    acknowledge(handoff.path(), handoff.nonce(), held.id()).is_err(),
++                    "{name}: genuine ack over a planted one"
++                );
++                handoff.close(held).unwrap();
++            }
++            // The genuine receiver's ack is accepted at once; the sender itself wrote
++            // nothing into HANDOFF, and every handoff draws a fresh well-formed nonce.
++            let handoff = HandoffDir::create_in(&root).unwrap();
++            let next = HandoffDir::create_in(&root).unwrap();
++            assert!(is_nonce(handoff.nonce()) && is_nonce(next.nonce()));
++            assert_ne!(handoff.nonce(), next.nonce());
++            assert_eq!(fs::read_dir(handoff.path()).unwrap().count(), 0);
++            let held = document.file_id().unwrap();
++            acknowledge(handoff.path(), handoff.nonce(), held.id()).unwrap();
++            let start = Instant::now();
++            assert!(handoff.wait_for_ack(Duration::from_secs(5), &held));
++            assert!(start.elapsed() < Duration::from_secs(2));
++            assert_eq!(
++                fs::read(handoff.path().join("ack")).unwrap(),
++                ack_content(handoff.nonce(), held.id()).into_bytes()
++            );
++            handoff.close(held).unwrap();
++            next.close(document.file_id().unwrap()).unwrap();
 +        }
 +
 +        #[cfg(unix)]
@@ -3256,8 +3530,13 @@ index 0000000..bf973bd
 +        &self.0
 +    }
 +
++    /// No nonce exists for an uncreatable handoff.
++    pub fn nonce(&self) -> &str {
++        ""
++    }
++
 +    /// Nothing can acknowledge an uncreatable handoff.
-+    pub fn wait_for_ack(&self, _timeout: std::time::Duration) -> bool {
++    pub fn wait_for_ack(&self, _timeout: std::time::Duration, _held: &HeldOriginal) -> bool {
 +        false
 +    }
 +
@@ -3367,7 +3646,7 @@ index 53f9c6c..0523984 100644
      fn find_defaults_to_the_ctrl_f_chord() {
          let keymap = Keymap::default();
 diff --git a/src/lib.rs b/src/lib.rs
-index 134b26a..b798a43 100644
+index 134b26a..76b5b93 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -13,6 +13,7 @@ pub mod azure_devops;
@@ -3999,7 +4278,7 @@ index 134b26a..b798a43 100644
          let mut app = App::new(repo.path().to_path_buf(), Scope::Uncommitted, None);
          let (tx, rx) = mpsc::channel();
          let mut epoch = 0;
-@@ -2679,6 +2990,252 @@ mod refresh_tests {
+@@ -2679,6 +2990,263 @@ mod refresh_tests {
              rx.recv_timeout(Duration::from_secs(5)).expect("recovery worker");
          assert_eq!(recovery_epoch, epoch);
          assert_eq!(target.theme(), "gruvbox");
@@ -4009,8 +4288,9 @@ index 134b26a..b798a43 100644
 +}
 +
 +/// Handoff contract v3, receiver side: `--file FILE --expect-parent P --expect-file F
-+/// --handoff H` binds FILE through its held parent without resolving it, checks both
-+/// identities, acknowledges with `H/ack`, and only then creates the lock or sidecar.
++/// --handoff H --handoff-nonce N` binds FILE through its held parent without resolving
++/// it, checks both identities, acknowledges with `H/ack` = `N DEV:INO` of the bound file,
++/// and only then creates the lock or sidecar.
 +#[cfg(all(test, unix))]
 +mod handoff_receiver_tests {
 +    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, symlink};
@@ -4065,7 +4345,10 @@ index 134b26a..b798a43 100644
 +        Fixture { _dir: dir, root, parent, file, other, handoff, parent_id, file_id }
 +    }
 +
-+    /// Exactly the argv the Python helper passes: FILE, LINE and the triple.
++    /// The sender's nonce in these fixtures (32 lowercase hex digits).
++    const NONCE: &str = "00112233445566778899aabbccddeeff";
++
++    /// Exactly the argv the Python helper passes: FILE, LINE, the triple and the nonce.
 +    fn argv(file: &Path, parent_id: &str, file_id: &str, handoff: &Path) -> Vec<String> {
 +        [
 +            "--file",
@@ -4078,6 +4361,8 @@ index 134b26a..b798a43 100644
 +            file_id,
 +            "--handoff",
 +            handoff.to_str().unwrap(),
++            "--handoff-nonce",
++            NONCE,
 +        ]
 +        .iter()
 +        .map(|s| (*s).to_string())
@@ -4100,6 +4385,11 @@ index 134b26a..b798a43 100644
 +        let ack = std::fs::symlink_metadata(f.handoff.join("ack")).unwrap();
 +        assert!(ack.file_type().is_file());
 +        assert_eq!(ack.mode() & 0o777, 0o600);
++        assert_eq!(
++            std::fs::read_to_string(f.handoff.join("ack")).unwrap(),
++            format!("{NONCE} {}\n", f.file_id),
++            "the ack carries the nonce from argv and the bound file's DEV:INO"
++        );
 +        assert_eq!(listing(&f.handoff), ["ack"]);
 +        assert_eq!(listing(&f.parent), ["A.md", "A.md.reviewr.json.lock"]);
 +        assert_eq!(std::fs::read_to_string(&f.file).unwrap(), "# A\nsecond\n");

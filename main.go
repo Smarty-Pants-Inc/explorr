@@ -69,6 +69,8 @@ type cliResult struct {
 	ExpectParent string
 	ExpectFile   string
 	Handoff      string
+	// HandoffNonce is the sender's per-handoff secret; the ack must carry it.
+	HandoffNonce string
 
 	// DebugAction and HerdRAction hold their validated subcommands.
 	// Both are empty for every other action.
@@ -276,7 +278,7 @@ func openHerdRFile(path string, line, col int, review bool) error {
 			return fmt.Errorf("Reviewr requires deployment-provided helper %q; no Explorr fallback", reviewMarkdownHelper)
 		}
 		return handoff.Send(path, func(s *handoff.Sender) error {
-			output, err := runReviewHelper(helper, s.File, strconv.Itoa(line), strconv.Itoa(col), s.ParentID, s.FileID, s.Dir)
+			output, err := runReviewHelper(helper, s.File, strconv.Itoa(line), strconv.Itoa(col), s.ParentID, s.FileID, s.Dir, s.Nonce)
 			if err != nil {
 				return fmt.Errorf("Reviewr helper %q failed: %w: %s", reviewMarkdownHelper, err, strings.TrimSpace(string(output)))
 			}
@@ -286,49 +288,57 @@ func openHerdRFile(path string, line, col int, review bool) error {
 	return openFileInHerdRSplit(path, line, col)
 }
 
-// The handoff contract v3 options. All three trail --single-file-at FILE LINE
+// The handoff contract v3 options. All four trail --single-file-at FILE LINE
 // COL, in any order, each exactly once.
 const (
 	expectParentFlag = "--expect-parent"
 	expectFileFlag   = "--expect-file"
 	handoffFlag      = "--handoff"
+	handoffNonceFlag = "--handoff-nonce"
 )
 
 // singleFileAtUsage is the refusal for any malformed --single-file-at form.
 const singleFileAtUsage = "--single-file-at needs FILE LINE COL " +
-	expectParentFlag + " DEV:INO " + expectFileFlag + " DEV:INO " + handoffFlag + " DIR"
+	expectParentFlag + " DEV:INO " + expectFileFlag + " DEV:INO " + handoffFlag + " DIR " + handoffNonceFlag + " HEX"
 
-// parseHandoffTriple accepts exactly the three identity options (any order,
-// each once) and nothing else; a missing, duplicate or extra word, a malformed
-// DEV:INO or a non-absolute/unnormalized HANDOFF is an error. IDs are
-// returned normalised.
-func parseHandoffTriple(rest []string) (parent, file, dir string, err error) {
-	if len(rest) != 6 {
-		return "", "", "", errors.New(singleFileAtUsage + " (all three options are required)")
+// parseHandoffTriple accepts exactly the four handoff options (the identity
+// triple plus the sender's nonce; any order, each once) and nothing else; a
+// missing, duplicate or extra word, a malformed DEV:INO or nonce, or a
+// non-absolute/unnormalized HANDOFF is an error. IDs are returned normalised.
+func parseHandoffTriple(rest []string) (parent, file, dir, nonce string, err error) {
+	if len(rest) != 8 {
+		return "", "", "", "", errors.New(singleFileAtUsage + " (all four options are required)")
 	}
 	seen := map[string]string{}
 	for i := 0; i < len(rest); i += 2 {
 		flag, value := rest[i], rest[i+1]
-		if flag != expectParentFlag && flag != expectFileFlag && flag != handoffFlag {
-			return "", "", "", errors.New(singleFileAtUsage)
+		if flag != expectParentFlag && flag != expectFileFlag && flag != handoffFlag && flag != handoffNonceFlag {
+			return "", "", "", "", errors.New(singleFileAtUsage)
 		}
 		if _, dup := seen[flag]; dup {
-			return "", "", "", fmt.Errorf("%s given twice; %s", flag, singleFileAtUsage)
+			return "", "", "", "", fmt.Errorf("%s given twice; %s", flag, singleFileAtUsage)
 		}
-		if flag == handoffFlag {
+		switch flag {
+		case handoffFlag:
 			if err := handoff.CheckPath(value); err != nil {
-				return "", "", "", fmt.Errorf("%s: %w", flag, err)
+				return "", "", "", "", fmt.Errorf("%s: %w", flag, err)
+			}
+			seen[flag] = value
+			continue
+		case handoffNonceFlag:
+			if err := handoff.CheckNonce(value); err != nil {
+				return "", "", "", "", fmt.Errorf("%s: %w", flag, err)
 			}
 			seen[flag] = value
 			continue
 		}
 		id, err := editor.ParseParentID(value)
 		if err != nil {
-			return "", "", "", fmt.Errorf("%s: %w", flag, err)
+			return "", "", "", "", fmt.Errorf("%s: %w", flag, err)
 		}
 		seen[flag] = id.String()
 	}
-	return seen[expectParentFlag], seen[expectFileFlag], seen[handoffFlag], nil
+	return seen[expectParentFlag], seen[expectFileFlag], seen[handoffFlag], seen[handoffNonceFlag], nil
 }
 
 // resolveArgs parses the editor's tiny CLI surface. The argument can be:
@@ -410,7 +420,7 @@ func resolveArgs(args []string) cliResult {
 		if len(args) < 4 {
 			return cliResult{Err: errors.New(singleFileAtUsage)}
 		}
-		expectParent, expectFile, handoffDir, err := parseHandoffTriple(args[4:])
+		expectParent, expectFile, handoffDir, nonce, err := parseHandoffTriple(args[4:])
 		if err != nil {
 			return cliResult{Err: err}
 		}
@@ -431,6 +441,7 @@ func resolveArgs(args []string) cliResult {
 			Action: actionEdit, RootDir: filepath.Dir(args[1]), OpenFile: args[1],
 			OpenLine: line, OpenCol: col, Isolated: true,
 			ExpectParent: expectParent, ExpectFile: expectFile, Handoff: handoffDir,
+			HandoffNonce: nonce,
 		}
 	case "--debug":
 		// Drive an ALREADY-RUNNING editor's debugger. Same mechanism as
@@ -593,7 +604,7 @@ func main() {
 		a, err = app.NewExplorer(res.RootDir)
 	case res.Isolated:
 		// resolveArgs never yields Isolated without the full triple.
-		a, err = app.NewIsolatedSingleFileAtExpecting(res.OpenFile, res.OpenLine, res.OpenCol, res.ExpectParent, res.ExpectFile, res.Handoff)
+		a, err = app.NewIsolatedSingleFileAtExpecting(res.OpenFile, res.OpenLine, res.OpenCol, res.ExpectParent, res.ExpectFile, res.Handoff, res.HandoffNonce)
 	case res.OpenFile != "":
 		a, err = app.NewSingleFileAt(res.OpenFile, res.OpenLine, res.OpenCol)
 	default:

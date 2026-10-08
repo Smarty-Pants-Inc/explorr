@@ -26,11 +26,11 @@ func TestReviewrBundleWithoutPluginPATH(t *testing.T) {
 			script := "#!/bin/sh\n" +
 				"test \"$HERDR_PANE_ID\" = wSource:p1 || exit 9\n" +
 				"printf '%s\\n' \"$1\" \"$2\" \"$3\" > \"$REVIEWR_TEST_ARGS\"\n" +
-				"test \"$#\" = 6 || exit 10\n"
+				"test \"$#\" = 7 || exit 10\n"
 			if fails {
 				script += "echo bundled-reviewr-error >&2\nexit 7\n"
 			} else {
-				script += ": > \"$6/ack\"\n"
+				script += "printf '%s %s\\n' \"$7\" \"$5\" > \"$6/ack\"\n"
 			}
 			if err := os.WriteFile(filepath.Join(bin, reviewMarkdownHelper), []byte(script), 0o755); err != nil {
 				t.Fatal(err)

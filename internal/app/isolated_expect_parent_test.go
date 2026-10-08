@@ -53,7 +53,7 @@ func TestIsolatedExpectParentMatchBinds(t *testing.T) {
 	isolatedReceiverEnvironment(t)
 	path, _ := isolatedSaveFiles(t)
 	id := isolatedExpectParentID(t, filepath.Dir(path))
-	a, err := NewIsolatedSingleFileAtExpecting(path, 1, 2, id, isolatedExpectFileID(t, path), t.TempDir())
+	a, err := NewIsolatedSingleFileAtExpecting(path, 1, 2, id, isolatedExpectFileID(t, path), t.TempDir(), testHandoffNonce)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestIsolatedExpectParentMismatchFailsClosed(t *testing.T) {
 				id = isolatedExpectParentID(t, filepath.Dir(victim))
 			}
 			before := isolatedPublisherSnapshot(t)
-			a, err := NewIsolatedSingleFileAtExpecting(path, 1, 1, id, fileID, t.TempDir())
+			a, err := NewIsolatedSingleFileAtExpecting(path, 1, 1, id, fileID, t.TempDir(), testHandoffNonce)
 			if a != nil || err == nil {
 				if a != nil {
 					a.Close()
