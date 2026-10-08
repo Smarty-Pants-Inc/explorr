@@ -1,7 +1,7 @@
 id = "com.smartypants.explorr"
 name = "Explorr"
 version = "1.0.3"
-min_herdr_version = "0.8.0"
+min_herdr_version = "0.9.1"
 description = "Workspace file explorer and editor for HerdR"
 platforms = ["linux", "macos"]
 
@@ -11,7 +11,7 @@ command = ["sh", "install.sh"]
 [[actions]]
 id = "open-file"
 title = "Open file in Explorr"
-description = "Markdown (.md/.markdown) links open in Reviewr at their encoded line with Explorr fallback; other local files open in a same-workspace Explorr right split"
+description = "Markdown and review=1 links require Reviewr at their encoded line; other local files open in a visible, unfocused Explorr right split beside the originating pane (click it to focus)"
 command = [
   "sh",
   "-c",
@@ -27,18 +27,6 @@ action = "open-file"
 [[panes]]
 id = "explorer"
 title = "explorer"
-description = "Browse the active workspace and open files in Explorr right splits"
-placement = "workspace_right"
-width = 26
+description = "Explicitly browse files beside the originating pane"
+placement = "split"
 command = ["sh", "-c", '''if [ -x "$HERDR_PLUGIN_ROOT/bin/explorr" ]; then exec "$HERDR_PLUGIN_ROOT/bin/explorr" --explorer; else exec explorr --explorer; fi''']
-
-[[startup]]
-command = [
-  "sh",
-  "-c",
-  '''"$HERDR_BIN_PATH" api snapshot | jq -r '.result.snapshot as $s | $s.workspaces[] as $w | $s.layouts[] | select(.workspace_id == $w.workspace_id and .tab_id == $w.active_tab_id) | .focused_pane_id as $pane_id | $s.panes[] | select(.pane_id == $pane_id) | [$w.workspace_id, (.cwd // $w.worktree.checkout_path // ".")] | @tsv' | while IFS="$(printf '\t')" read -r workspace cwd; do "$HERDR_BIN_PATH" plugin pane open --plugin "$HERDR_PLUGIN_ID" --entrypoint explorer --workspace "$workspace" --cwd "$cwd" --no-focus >/dev/null; done''',
-]
-
-[[events]]
-on = "workspace.created"
-command = ["sh", "-c", 'cwd="$(printf %s "$HERDR_PLUGIN_CONTEXT_JSON" | jq -r ".focused_pane_cwd // .workspace_cwd")"; "$HERDR_BIN_PATH" plugin pane open --plugin "$HERDR_PLUGIN_ID" --entrypoint explorer --workspace "$HERDR_WORKSPACE_ID" --cwd "$cwd" --no-focus >/dev/null']

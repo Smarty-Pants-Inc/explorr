@@ -1,0 +1,461 @@
+# Copyright (c) 2026 Smarty Pants, Inc. SPDX-License-Identifier: MIT
+"""Small subprocess probes of the helper's public argv and pane safety contract."""
+
+import json
+import os
+from pathlib import Path
+import shlex
+import shutil
+import subprocess
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parent
+# A well-formed sender nonce (32 lowercase hex digits).
+NONCE = '00112233445566778899aabbccddeeff'
+FAKE_HERDR = '''#!/usr/bin/env python3
+import json, os, subprocess, sys
+args = sys.argv[1:]
+with open(os.environ['CALL_LOG'], 'a') as log:
+    log.write(json.dumps(args) + '\\n')
+if args[:2] == ['pane', 'split']:
+    if os.environ.get('FAIL_SPLIT'):
+        print('stale origin: not found', file=sys.stderr)
+        sys.exit(7)
+    print(os.environ.get('SPLIT_REPLY', json.dumps({'result': {'pane': {'pane_id': 'wA:p8'}}})))
+elif args[:2] == ['pane', 'run']:
+    if os.environ.get('FAIL_RUN'):
+        print('run stdout detail')
+        print('run stderr detail', file=sys.stderr)
+        sys.exit(9)
+    if os.environ.get('EXECUTE_COMMAND'):
+        sys.exit(subprocess.run(['/bin/sh', '-c', args[3]]).returncode)
+elif args[:2] == ['pane', 'close'] and os.environ.get('FAIL_CLOSE'):
+    print('close failed', file=sys.stderr)
+    sys.exit(10)
+'''
+FAKE_PROGRAM = '''#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ['PROGRAM_LOG'], 'w') as log:
+    json.dump(sys.argv, log)
+'''
+
+
+class OpenFileTests(unittest.TestCase):
+    """Exercise installed/symlink entry points, not only internal functions."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='reviewr helper ')
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.bundle = self.base / 'bundle' / 'reviewr'
+        (self.bundle / 'bin').mkdir(parents=True)
+        shutil.copy2(ROOT / 'open-file', self.bundle / 'open-file')
+        (self.bundle / 'edit-original').symlink_to('open-file')
+        self.launch = self.base / 'launch'
+        self.launch.mkdir()
+        (self.launch / 'herdr-review-last-markdown').symlink_to(self.bundle / 'open-file')
+        (self.launch / 'herdr-review-edit-original').symlink_to(self.bundle / 'edit-original')
+        self.manager = self.base / "herdr ' manager"
+        self.write_executable(self.manager, FAKE_HERDR)
+        self.reviewr = self.bundle / 'bin' / 'herdr-reviewr'
+        self.write_executable(self.reviewr, FAKE_PROGRAM)
+        self.explorr = self.bundle.parent / 'herdr' / 'bin' / 'explorr'
+        self.explorr.parent.mkdir(parents=True)
+        self.write_executable(self.explorr, FAKE_PROGRAM)
+        self.file = self.base / 'plain file.md'
+        self.file.write_text('# non-Git markdown\nline two\n')
+        self.log = self.base / 'calls.jsonl'
+        self.program_log = self.base / 'program.json'
+        self.env = {key: value for key, value in os.environ.items()
+                    if not key.startswith(('HERDR_', 'EXPLORR_'))}
+        # The sender's private per-launch acknowledgement directory.
+        self.handoff = self.base / 'handoff'
+        self.handoff.mkdir(mode=0o700)
+        self.env.update(HERDR_PANE_ID='wA:p7', HERDR_BIN_PATH=str(self.manager),
+                        CALL_LOG=str(self.log), PROGRAM_LOG=str(self.program_log),
+                        HERDR_WORKSPACE_ID='wWrong', HERDR_TAB_ID='wWrong:t2')
+
+    def write_executable(self, path, text):
+        """Make an inert deterministic CLI fixture."""
+        path.write_text(text)
+        path.chmod(0o755)
+
+    def invoke(self, file=None, line='2', col='13', edit=False, parent=None, file_id=None,
+               handoff=None, nonce=NONCE):
+        """Run the named public helper with the isolated fixture environment.
+
+        Both modes pass the sender's held DEV:INO identities and its handoff
+        directory, by default the real current ones."""
+        target = file or self.file
+        return self.raw(edit, str(target), line, col,
+                        parent or self.ident_of(target.parent, os.stat),
+                        file_id or self.ident_of(target, os.lstat),
+                        handoff or str(self.handoff), nonce)
+
+    @staticmethod
+    def ident(info):
+        return f'{info.st_dev & 0xFFFFFFFFFFFFFFFF}:{info.st_ino}'
+
+    def ident_of(self, path, how):
+        try:
+            return self.ident(how(path))
+        except OSError:
+            return '1:1'
+
+    def raw(self, edit, *args):
+        """Call an entry point with exactly these arguments."""
+        name = 'herdr-review-edit-original' if edit else 'herdr-review-last-markdown'
+        return subprocess.run([str(self.launch / name), *args],
+                              env=self.env, capture_output=True, text=True)
+
+    def identities(self, file):
+        return ['--expect-parent', self.ident(os.stat(file.parent)),
+                '--expect-file', self.ident(os.lstat(file)), '--handoff', str(self.handoff),
+                '--handoff-nonce', NONCE]
+
+    def calls(self):
+        """Read exact manager argv, preserving shell metacharacters."""
+        return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
+
+    def test_explicit_origin_non_git_file_line_and_no_focus(self):
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls()[0], ['pane', 'split', '--pane', 'wA:p7',
+                         '--direction', 'right', '--cwd', str(self.file.parent), '--no-focus'])
+        self.assertEqual(self.calls()[1][:3], ['pane', 'run', 'wA:p8'])
+        self.assertEqual(shlex.split(self.calls()[1][3]),
+                         ['exec', str(self.reviewr), '--file', str(self.file), '--line', '2',
+                          *self.identities(self.file)])
+        self.assertFalse((self.base / '.git').exists())
+        self.assertEqual(len(self.calls()), 2)
+
+    def test_shell_quotes_survive_actual_shell_without_injection(self):
+        file = self.base / "- ' $(touch PWNED); `echo bad` & : file.md"
+        file.write_text('markdown')
+        self.env['EXECUTE_COMMAND'] = '1'
+        result = self.invoke(file=file)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(self.program_log.read_text())[1:],
+                         ['--file', str(file), '--line', '2', *self.identities(file)])
+        self.assertFalse((self.base / 'PWNED').exists())
+        self.assertFalse((ROOT.parent / 'PWNED').exists())
+
+    def test_review_never_resolves_a_symlink_file(self):
+        # The sender resolved the link once and holds the result; a symlink here
+        # is a swap since, so the helper refuses instead of following it.
+        link = self.base / 'alias.md'
+        link.symlink_to(self.file)
+        result = self.invoke(file=link)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('no longer a regular file', result.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_missing_or_pseudo_origin_never_calls_manager(self):
+        for origin in ['', 'current', 'focused', 'wA', 'wA:p1 --current', 'wA:p0\n']:
+            with self.subTest(origin=origin):
+                self.env['HERDR_PANE_ID'] = origin
+                result = self.invoke()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('HERDR_PANE_ID', result.stderr)
+                self.assertEqual(self.calls(), [])
+
+    def test_herdr_base32_pane_numbers_past_nine_are_real_panes(self):
+        # HerdR 0.9.1 encodes pane 10 as pA (alphabet 1-9, A-Z without I/L/O/U, then 0).
+        self.env.update(HERDR_PANE_ID='w1:pA',
+                        SPLIT_REPLY=json.dumps({'result': {'pane': {'pane_id': 'w1:pZ1'}}}))
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls()[0][3], 'w1:pA')
+        self.assertEqual(self.calls()[1][:3], ['pane', 'run', 'w1:pZ1'])
+        for origin in ['w1:pa', 'w1:pI', 'w1:pO', 'w1:pL', 'w1:pU']:
+            with self.subTest(origin=origin):
+                self.log.unlink(missing_ok=True)
+                self.env['HERDR_PANE_ID'] = origin
+                result = self.invoke()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.calls(), [])
+
+    def test_stale_origin_has_no_fallback(self):
+        self.env['FAIL_SPLIT'] = '1'
+        result = self.invoke()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('stale origin', result.stderr)
+        self.assertIn(shlex.quote(str(self.manager)), result.stderr)
+        self.assertEqual(len(self.calls()), 1)
+        self.assertEqual(self.calls()[0][3], 'wA:p7')
+
+    def test_run_failure_closes_only_created_pane_and_reports_both_outputs(self):
+        self.env['FAIL_RUN'] = '1'
+        result = self.invoke()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.calls()[2], ['pane', 'close', 'wA:p8'])
+        self.assertIn('run stdout detail', result.stderr)
+        self.assertIn('run stderr detail', result.stderr)
+        self.assertIn('pane run wA:p8', result.stderr)
+        self.assertEqual(len(self.calls()), 3)
+
+    def test_cleanup_failure_is_reported_without_retry(self):
+        self.env.update(FAIL_RUN='1', FAIL_CLOSE='1')
+        result = self.invoke()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('cleanup also failed', result.stderr)
+        self.assertEqual(len(self.calls()), 3)
+
+    def test_bad_response_never_runs_or_closes_an_unverified_pane(self):
+        for reply in ['not JSON', '{"result":{}}',
+                      '{"result":{"pane":{"pane_id":"current"}}}',
+                      '{"result":{"pane":{"pane_id":"wA:p7"}}}',
+                      '{"result":{"pane":{"pane_id":"wOther:p8"}}}']:
+            with self.subTest(reply=reply):
+                self.log.unlink(missing_ok=True)
+                self.env['SPLIT_REPLY'] = reply
+                result = self.invoke()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(len(self.calls()), 1)
+
+    def test_missing_patched_binary_fails_before_split_no_path_fallback(self):
+        self.reviewr.unlink()
+        # Even a similarly named executable on PATH must not replace our patch.
+        self.write_executable(self.launch / 'herdr-reviewr', FAKE_PROGRAM)
+        self.env['PATH'] = str(self.launch) + os.pathsep + self.env['PATH']
+        result = self.invoke()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('missing bundled herdr-reviewr', result.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_edit_launches_native_explorr_not_markdown_handler(self):
+        self.env['EXECUTE_COMMAND'] = '1'
+        result = self.invoke(edit=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(self.program_log.read_text()),
+                         [str(self.explorr), '--single-file-at', str(self.file), '2', '13',
+                          *self.identities(self.file)])
+        self.assertNotIn('--open-at', self.calls()[1][3])
+        self.assertNotIn('--herdr-open', self.calls()[1][3])
+
+    def test_both_modes_refuse_replaced_parent_before_split(self):
+        # The sender holds current/; a new directory now sits at that path with a
+        # different same-named file. Neither route may launch it.
+        for edit in (False, True):
+            with self.subTest(edit=edit):
+                current = self.base / ('current-edit' if edit else 'current-review')
+                current.mkdir()
+                document = current / 'A.md'
+                document.write_text('reviewed document')
+                held = self.ident(os.stat(current))
+                current.rename(current.with_name(current.name + '-moved'))
+                current.mkdir()
+                document.write_text('different document at the same pathname')
+                result = self.invoke(file=document, edit=edit, parent=held)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('directory was replaced', result.stderr)
+                self.assertEqual(self.calls(), [])
+
+    def test_both_modes_require_well_formed_identities_and_handoff(self):
+        good = [self.ident(os.stat(self.file.parent)), self.ident(os.lstat(self.file)),
+                str(self.handoff), NONCE]
+        for edit in (False, True):
+            for bad in ['', '1', '1:', ':2', '1:2:3', '-1:2', '1:2\n', '1:2; touch bad']:
+                for index in (0, 1):
+                    args = list(good)
+                    args[index] = bad
+                    with self.subTest(edit=edit, args=args):
+                        result = self.raw(edit, str(self.file), '2', '13', *args)
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertEqual(self.calls(), [])
+            for args in [[], good[:1], good[:2], good[:3], good + ['extra']]:
+                with self.subTest(edit=edit, count=len(args)):
+                    result = self.raw(edit, str(self.file), '2', '13', *args)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('PARENT_ID FILE_ID HANDOFF NONCE', result.stderr)
+                    self.assertEqual(self.calls(), [])
+            for bad in ['', NONCE[:30], NONCE + '00', NONCE.upper(), 'zz' + NONCE[2:],
+                        NONCE + '\n', "x'; touch bad"]:
+                with self.subTest(edit=edit, nonce=bad):
+                    result = self.raw(edit, str(self.file), '2', '13', *good[:3], bad)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('NONCE', result.stderr)
+                    self.assertEqual(self.calls(), [])
+
+    def test_handoff_must_be_a_private_directory_owned_by_this_user(self):
+        loose = self.base / 'loose'
+        loose.mkdir(mode=0o755)
+        loose.chmod(0o755)
+        linked = self.base / 'linked-handoff'
+        linked.symlink_to(self.handoff)
+        plain = self.base / 'plain-handoff'
+        plain.write_text('not a directory')
+        for edit in (False, True):
+            for handoff in ['handoff', str(self.base / 'missing'), str(loose), str(linked),
+                            str(plain), f'{self.handoff}/', f'{self.base}/./handoff']:
+                with self.subTest(edit=edit, handoff=handoff):
+                    result = self.invoke(edit=edit, handoff=handoff)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('HANDOFF', result.stderr)
+                    self.assertEqual(self.calls(), [])
+
+    def same_parent_pair(self):
+        """Reviewed current/A.md beside unrelated current/B.md, with A's identities."""
+        current = self.base / 'current'
+        current.mkdir()
+        a, b = current / 'A.md', current / 'B.md'
+        a.write_text('reviewed A')
+        b.write_text('unrelated B')
+        return a, b, self.ident(os.stat(current)), self.ident(os.lstat(a))
+
+    def test_both_modes_refuse_same_parent_symlink_swap(self):
+        # After the sender identified A, A becomes a symlink to B in the SAME
+        # directory. Resolving would hand the receiver B with a matching parent.
+        for edit in (False, True):
+            with self.subTest(edit=edit):
+                a, b, parent, file_id = self.same_parent_pair()
+                a.unlink()
+                a.symlink_to(b.name)
+                result = self.invoke(file=a, edit=edit, parent=parent, file_id=file_id)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('no longer a regular file', result.stderr)
+                self.assertEqual(self.calls(), [])
+                self.assertEqual(b.read_text(), 'unrelated B')
+                shutil.rmtree(a.parent)
+
+    def test_both_modes_refuse_same_parent_hard_link_or_replacement(self):
+        for edit in (False, True):
+            with self.subTest(edit=edit):
+                a, b, parent, file_id = self.same_parent_pair()
+                a.unlink()
+                os.link(b, a)                      # regular file, but B's inode
+                result = self.invoke(file=a, edit=edit, parent=parent, file_id=file_id)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('file was replaced', result.stderr)
+                self.assertEqual(self.calls(), [])
+                # Restore A, take its identity, then atomically rename a different file
+                # over it (created while A still exists, so the inode cannot be reused).
+                a.unlink()
+                a.write_text('reviewed A')
+                file_id = self.ident(os.lstat(a))
+                temp = a.with_name('editor.tmp')
+                temp.write_text('a different regular file')
+                temp.replace(a)
+                result = self.invoke(file=a, edit=edit, parent=parent, file_id=file_id)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.calls(), [])
+                shutil.rmtree(a.parent)
+
+    def test_both_modes_require_absolute_normalized_path(self):
+        a, _, parent, file_id = self.same_parent_pair()
+        for edit in (False, True):
+            for spelling in ['current/A.md', f'{a.parent}/./A.md', f'{a.parent}//A.md',
+                             f'{a.parent}/../current/A.md', str(a) + '/']:
+                with self.subTest(edit=edit, spelling=spelling):
+                    result = self.raw(edit, spelling, '2', '13', parent, file_id,
+                                      str(self.handoff))
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(self.calls(), [])
+
+    def test_both_modes_pass_the_unresolved_path_and_identities(self):
+        # The helper never canonicalizes: what the sender holds is what the receiver gets.
+        a, _, parent, file_id = self.same_parent_pair()
+        self.env['EXECUTE_COMMAND'] = '1'
+        result = self.invoke(file=a, edit=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(self.program_log.read_text())[1:],
+                         ['--single-file-at', str(a), '2', '13', '--expect-parent', parent,
+                          '--expect-file', file_id, '--handoff', str(self.handoff),
+                          '--handoff-nonce', NONCE])
+        result = self.invoke(file=a)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(self.program_log.read_text())[1:],
+                         ['--file', str(a), '--line', '2', '--expect-parent', parent,
+                          '--expect-file', file_id, '--handoff', str(self.handoff),
+                          '--handoff-nonce', NONCE])
+
+    def test_plugin_bin_and_absolute_explorr_override(self):
+        self.explorr.unlink()
+        plugin = self.base / 'installed plugin'
+        (plugin / 'bin').mkdir(parents=True)
+        target = plugin / 'bin' / 'explorr'
+        self.write_executable(target, FAKE_PROGRAM)
+        self.env['HERDR_PLUGIN_ROOT'] = str(plugin)
+        self.assertEqual(self.invoke(edit=True).returncode, 0)
+        self.assertEqual(shlex.split(self.calls()[1][3])[1], str(target))
+        override = self.base / 'absolute explorr'
+        self.write_executable(override, FAKE_PROGRAM)
+        self.env['EXPLORR_BIN_PATH'] = str(override)
+        self.assertEqual(self.invoke(edit=True).returncode, 0)
+        self.assertEqual(shlex.split(self.calls()[3][3])[1], str(override))
+
+    def test_missing_explorr_fails_before_split(self):
+        self.explorr.unlink()
+        self.env['PATH'] = os.defpath
+        result = self.invoke(edit=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('missing bundled explorr', result.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_invalid_explorr_override_fails_before_split(self):
+        self.env['EXPLORR_BIN_PATH'] = 'relative-explorr'
+        self.assertNotEqual(self.invoke(edit=True).returncode, 0)
+        self.assertEqual(self.calls(), [])
+
+    def test_helper_copied_directly_into_plugin_bin_uses_actual_sibling(self):
+        plugin_bin = self.base / 'copied plugin' / 'bin'
+        plugin_bin.mkdir(parents=True)
+        shutil.copy2(ROOT / 'open-file', plugin_bin / 'herdr-review-last-markdown')
+        self.write_executable(plugin_bin / 'herdr-reviewr', FAKE_PROGRAM)
+        result = subprocess.run([str(plugin_bin / 'herdr-review-last-markdown'),
+                                 str(self.file), '2', '1',
+                                 self.ident(os.stat(self.file.parent)),
+                                 self.ident(os.lstat(self.file)), str(self.handoff), NONCE],
+                                env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(shlex.split(self.calls()[1][3])[1], str(plugin_bin / 'herdr-reviewr'))
+
+    def test_herdr_path_fallback_uses_argv(self):
+        del self.env['HERDR_BIN_PATH']
+        shutil.copy2(self.manager, self.launch / 'herdr')
+        self.env['PATH'] = str(self.launch) + os.pathsep + self.env['PATH']
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.calls()), 2)
+
+    def test_invalid_missing_directory_or_control_path_fails_before_split(self):
+        for file in [self.base / 'missing.md', self.base, self.base / 'newline\n.md']:
+            with self.subTest(file=file):
+                self.assertNotEqual(self.invoke(file=file).returncode, 0)
+                self.assertEqual(self.calls(), [])
+
+    def test_control_character_symlink_target_fails_before_split(self):
+        target = self.base / 'control\t.md'
+        target.write_text('file')
+        alias = self.base / 'safe-alias.md'
+        alias.symlink_to(target)
+        self.assertNotEqual(self.invoke(file=alias).returncode, 0)
+        self.assertEqual(self.calls(), [])
+
+    def test_c1_controls_and_invalid_utf8_fail_before_split(self):
+        for name in ['control\x7f.md', 'control\x85.md', 'control\x9f.md', os.fsdecode(b'invalid\xff.md')]:
+            with self.subTest(name=repr(name)):
+                file = self.base / name
+                file.write_text('source')
+                self.assertNotEqual(self.invoke(file=file).returncode, 0)
+                self.assertEqual(self.calls(), [])
+                alias = self.base / 'valid-alias.md'
+                alias.symlink_to(file)
+                self.assertNotEqual(self.invoke(file=alias).returncode, 0)
+                self.assertEqual(self.calls(), [])
+                alias.unlink()
+
+    def test_coordinate_validation_and_u32_limit_precede_split(self):
+        for line, col in [('0', '1'), ('1', '0'), ('-1', '1'), ('1;touch bad', '1'),
+                          ('4294967296', '1'), ('1', str(2**63)), ('1', '1\n')]:
+            with self.subTest(line=line, col=col):
+                self.assertNotEqual(self.invoke(line=line, col=col).returncode, 0)
+                self.assertEqual(self.calls(), [])
+        self.assertEqual(self.invoke(line='4294967295').returncode, 0)
+        command = shlex.split(self.calls()[1][3])
+        self.assertEqual(command[command.index('--line') + 1], '4294967295')
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -1,0 +1,12 @@
+{
+  "repository": "https://github.com/persiyanov/herdr-reviewr",
+  "tag": "v0.30.1",
+  "archive_url": "https://codeload.github.com/persiyanov/herdr-reviewr/tar.gz/refs/tags/v0.30.1",
+  "sha256": "a34e286da3defb9edcf52ed44d1178c591ca443a99c63e1d4101505712b15694",
+  "archive_root": "herdr-reviewr-0.30.1",
+  "binary": "herdr-reviewr",
+  "rust_version": "1.97",
+  "license": "MIT",
+  "copyright": "Copyright (c) 2026 Dmitry Persiyanov",
+  "patch": "upstream.patch"
+}

@@ -13,16 +13,22 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	"github.com/Smarty-Pants-Inc/explorr/internal/app"
+	"github.com/Smarty-Pants-Inc/explorr/internal/editor"
+	"github.com/Smarty-Pants-Inc/explorr/internal/handoff"
 	"github.com/Smarty-Pants-Inc/explorr/internal/state"
 	"github.com/Smarty-Pants-Inc/explorr/internal/toolpath"
 	"github.com/Smarty-Pants-Inc/explorr/internal/version"
@@ -49,11 +55,22 @@ const (
 // action to run, where to root the editor, which file (if any) to open
 // in the first tab, and any user-facing error to surface before exit.
 type cliResult struct {
-	Action   cliAction
-	RootDir  string
-	OpenFile string // empty when no file was named (or for non-edit actions)
-	OpenLine int
-	OpenCol  int
+	Action     cliAction
+	RootDir    string
+	OpenFile   string // empty when no file was named (or for non-edit actions)
+	OpenLine   int
+	OpenCol    int
+	ReviewFile bool // explicit ?review=1, in addition to Markdown's default route
+	Isolated   bool // dedicated --single-file-at launch; ignore shared panel requests
+	// ExpectParent, ExpectFile and Handoff are --single-file-at's REQUIRED
+	// identity triple (handoff contract v3): the sender-held DEV:INO of the
+	// file's parent directory and of the file itself, and the sender's HANDOFF
+	// directory the receiver acknowledges in. The pane fails closed otherwise.
+	ExpectParent string
+	ExpectFile   string
+	Handoff      string
+	// HandoffNonce is the sender's per-handoff secret; the ack must carry it.
+	HandoffNonce string
 
 	// DebugAction and HerdRAction hold their validated subcommands.
 	// Both are empty for every other action.
@@ -71,81 +88,257 @@ func positivePosition(raw, name string) (int, error) {
 	return value, nil
 }
 
-func validateExistingFile(path string) error {
-	info, err := os.Stat(path)
-	if err != nil {
-		return err
+// localFileHosts mirrors smarty.file-links' empty, localhost, hostname, short
+// hostname and FQDN authorities. Only these full authorities are accepted.
+func localFileHosts(hostname, fqdn string) map[string]bool {
+	hosts := map[string]bool{"": true, "localhost": true}
+	for _, host := range []string{hostname, strings.SplitN(hostname, ".", 2)[0], fqdn} {
+		if host != "" {
+			hosts[strings.ToLower(host)] = true
+		}
 	}
-	if info.IsDir() {
-		return fmt.Errorf("expected a file, got directory %q", path)
-	}
-	return nil
+	return hosts
 }
 
+// systemLocalFileHosts resolves only our own hostname, never the untrusted URL
+// host. Bound DNS work so a broken local resolver cannot hang a link action.
+func systemLocalFileHosts() map[string]bool {
+	hostname, _ := os.Hostname()
+	fqdn := hostname
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if name, err := net.DefaultResolver.LookupCNAME(ctx, hostname); err == nil {
+		fqdn = strings.TrimSuffix(name, ".")
+	}
+	if !strings.Contains(fqdn, ".") && hostname != "" {
+		if addresses, err := net.DefaultResolver.LookupIPAddr(ctx, hostname); err == nil {
+			for _, address := range addresses {
+				names, err := net.DefaultResolver.LookupAddr(ctx, address.IP.String())
+				if err != nil {
+					continue
+				}
+				for _, name := range names {
+					if name = strings.TrimSuffix(name, "."); strings.Contains(name, ".") {
+						fqdn = name
+						return localFileHosts(hostname, fqdn)
+					}
+				}
+			}
+		}
+	}
+	return localFileHosts(hostname, fqdn)
+}
+
+// unsafeFileURLText rejects invalid UTF-8 and the C0, DEL and C1 controls
+// forbidden by smarty.file-links, including controls in resolved symlink names.
+func unsafeFileURLText(text string) bool {
+	return !utf8.ValidString(text) || strings.ContainsFunc(text, func(r rune) bool {
+		return r < 0x20 || (r >= 0x7f && r <= 0x9f)
+	})
+}
+
+// fileURLPositionValue accepts ASCII digits only, matching OSC8 #line links.
+func fileURLPositionValue(raw, name string) (int, error) {
+	if len(raw) == 0 || strings.ContainsFunc(raw, func(r rune) bool { return r < '0' || r > '9' }) {
+		return 0, fmt.Errorf("%s must be ASCII digits", name)
+	}
+	return positivePosition(raw, name)
+}
+
+// fileURLPosition rejects duplicate parameters instead of choosing a value.
 func fileURLPosition(values url.Values, name string) (int, error) {
 	raw, ok := values[name]
 	if !ok {
 		return 1, nil
 	}
-	if len(raw) != 1 || raw[0] == "" {
-		return 0, fmt.Errorf("%s must appear once with a positive integer", name)
+	if len(raw) != 1 {
+		return 0, fmt.Errorf("%s must appear once", name)
 	}
-	return positivePosition(raw[0], name)
+	return fileURLPositionValue(raw[0], name)
 }
 
-func parseLocalFileURL(raw string) (string, int, int, error) {
+// parseLocalFileURL validates a clicked URL and returns its canonical target,
+// position and explicit Reviewr opt-in. Markdown routing is decided separately.
+func parseLocalFileURL(raw string) (string, int, int, bool, error) {
+	return parseLocalFileURLForHosts(raw, systemLocalFileHosts())
+}
+
+// parseLocalFileURLForHosts keeps local-authority validation deterministic in
+// tests while sharing exactly the production URL and filesystem checks.
+func parseLocalFileURLForHosts(raw string, hosts map[string]bool) (string, int, int, bool, error) {
+	if unsafeFileURLText(raw) {
+		return "", 0, 0, false, errors.New("file URL has control characters or invalid UTF-8")
+	}
 	parsed, err := url.Parse(raw)
 	if err != nil {
-		return "", 0, 0, err
+		return "", 0, 0, false, err
 	}
-	if parsed.Scheme != "file" || parsed.Opaque != "" || parsed.User != nil || parsed.Fragment != "" || (parsed.Host != "" && !strings.EqualFold(parsed.Host, "localhost")) {
-		return "", 0, 0, errors.New("--herdr-open needs a local file URL")
+	// Match the complete authority, not Hostname(): credentials and ports must
+	// not turn into an allowed local hostname after parsing.
+	if parsed.Scheme != "file" || parsed.Opaque != "" || parsed.User != nil || !hosts[strings.ToLower(parsed.Host)] {
+		return "", 0, 0, false, errors.New("--herdr-open needs a local file URL without credentials or ports")
 	}
-	path, err := url.PathUnescape(parsed.EscapedPath())
+	// url.Parse has already percent-decoded Path once. Do not unescape again:
+	// a literal filename containing "%0a" must not become a newline.
+	clicked := parsed.Path
+	if !filepath.IsAbs(clicked) || unsafeFileURLText(clicked) {
+		return "", 0, 0, false, errors.New("file URL path must be absolute and contain no control characters or invalid UTF-8")
+	}
+	path, err := filepath.EvalSymlinks(clicked)
 	if err != nil {
-		return "", 0, 0, err
+		return "", 0, 0, false, err
 	}
-	if !filepath.IsAbs(path) {
-		return "", 0, 0, errors.New("file URL path must be absolute")
+	if !filepath.IsAbs(path) || unsafeFileURLText(path) {
+		return "", 0, 0, false, errors.New("resolved file URL path is unsafe")
 	}
-	if err := validateExistingFile(path); err != nil {
-		return "", 0, 0, err
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", 0, 0, false, err
+	}
+	if !info.Mode().IsRegular() {
+		return "", 0, 0, false, errors.New("file URL target must be a regular file")
 	}
 	query, err := url.ParseQuery(parsed.RawQuery)
 	if err != nil {
-		return "", 0, 0, err
+		return "", 0, 0, false, err
+	}
+	if parsed.ForceQuery || strings.HasPrefix(parsed.RawQuery, "&") || strings.HasSuffix(parsed.RawQuery, "&") || strings.Contains(parsed.RawQuery, "&&") {
+		return "", 0, 0, false, errors.New("file URL query contains an empty parameter")
+	}
+	for name := range query {
+		if name != "line" && name != "col" && name != "review" {
+			return "", 0, 0, false, fmt.Errorf("unsupported file URL query %q", name)
+		}
+	}
+	review := false
+	if values, exists := query["review"]; exists {
+		if len(values) != 1 || values[0] != "1" {
+			return "", 0, 0, false, errors.New("review must appear once as review=1")
+		}
+		review = true
 	}
 	line, err := fileURLPosition(query, "line")
 	if err != nil {
-		return "", 0, 0, err
+		return "", 0, 0, false, err
+	}
+	if strings.Contains(raw, "#") {
+		if _, exists := query["line"]; exists {
+			return "", 0, 0, false, errors.New("file URL line appears in both query and fragment")
+		}
+		// Use the encoded spelling so percent-encoded fragment digits are not
+		// silently accepted where smarty.file-links requires ASCII digits.
+		fragment := parsed.EscapedFragment()
+		if len(fragment) > 9 {
+			return "", 0, 0, false, errors.New("line fragment must be at most 9 digits")
+		}
+		line, err = fileURLPositionValue(fragment, "line fragment")
+		if err != nil {
+			return "", 0, 0, false, err
+		}
 	}
 	col, err := fileURLPosition(query, "col")
 	if err != nil {
-		return "", 0, 0, err
+		return "", 0, 0, false, err
 	}
-	return path, line, col, nil
+	return path, line, col, review, nil
 }
 
+// reviewMarkdownHelper is a deployment-provided contract, NOT an upstream
+// Reviewr command. Despite its historical name, it must open the explicit
+// canonical filename, line and column, with the handoff contract v3 identity
+// triple, supplied as six separate argv values.
 const reviewMarkdownHelper = "herdr-review-last-markdown"
 
 var openFileInHerdRSplit = app.OpenFileInHerdRSplit
 
-// openHerdRFile sends local Markdown links and their requested position to
-// Reviewr when its helper works; every other validated local file opens in a
-// same-workspace Explorr right split.
-func openHerdRFile(path string, line, col int) error {
-	if ext := strings.ToLower(filepath.Ext(path)); ext == ".md" || ext == ".markdown" {
-		helper, err := exec.LookPath(reviewMarkdownHelper)
-		if err != nil {
+// runReviewHelper executes the Reviewr helper; tests substitute a recording fake.
+var runReviewHelper = func(helper string, args ...string) ([]byte, error) {
+	return exec.Command(helper, args...).CombinedOutput()
+}
+
+// openHerdRFile routes Markdown and explicit review=1 links to Reviewr. Missing
+// or failing helpers fail closed; ordinary non-Markdown links still use Explorr.
+// path is the link's single canonical resolution; both routes identify and
+// HOLD it and return only after the receiver acknowledged (handoff contract v3).
+func openHerdRFile(path string, line, col int, review bool) error {
+	if ext := strings.ToLower(filepath.Ext(path)); review || ext == ".md" || ext == ".markdown" {
+		// Herdr supplies the plugin root, but does not prepend its bin to PATH.
+		// Prefer the bundled patched helper before the global-install paths.
+		var helper string
+		if root := os.Getenv("HERDR_PLUGIN_ROOT"); root != "" {
+			helper, _ = exec.LookPath(filepath.Join(root, "bin", reviewMarkdownHelper))
+		}
+		if helper == "" {
+			helper, _ = exec.LookPath(reviewMarkdownHelper)
+		}
+		if helper == "" {
 			helper = toolpath.Look(reviewMarkdownHelper)
 		}
-		if helper != "" {
-			if err := exec.Command(helper, path, strconv.Itoa(line), strconv.Itoa(col)).Run(); err == nil {
-				return nil
-			}
+		if helper == "" {
+			return fmt.Errorf("Reviewr requires deployment-provided helper %q; no Explorr fallback", reviewMarkdownHelper)
 		}
+		return handoff.Send(path, func(s *handoff.Sender) error {
+			output, err := runReviewHelper(helper, s.File, strconv.Itoa(line), strconv.Itoa(col), s.ParentID, s.FileID, s.Dir, s.Nonce)
+			if err != nil {
+				return fmt.Errorf("Reviewr helper %q failed: %w: %s", reviewMarkdownHelper, err, strings.TrimSpace(string(output)))
+			}
+			return nil
+		})
 	}
 	return openFileInHerdRSplit(path, line, col)
+}
+
+// The handoff contract v3 options. All four trail --single-file-at FILE LINE
+// COL, in any order, each exactly once.
+const (
+	expectParentFlag = "--expect-parent"
+	expectFileFlag   = "--expect-file"
+	handoffFlag      = "--handoff"
+	handoffNonceFlag = "--handoff-nonce"
+)
+
+// singleFileAtUsage is the refusal for any malformed --single-file-at form.
+const singleFileAtUsage = "--single-file-at needs FILE LINE COL " +
+	expectParentFlag + " DEV:INO " + expectFileFlag + " DEV:INO " + handoffFlag + " DIR " + handoffNonceFlag + " HEX"
+
+// parseHandoffTriple accepts exactly the four handoff options (the identity
+// triple plus the sender's nonce; any order, each once) and nothing else; a
+// missing, duplicate or extra word, a malformed DEV:INO or nonce, or a
+// non-absolute/unnormalized HANDOFF is an error. IDs are returned normalised.
+func parseHandoffTriple(rest []string) (parent, file, dir, nonce string, err error) {
+	if len(rest) != 8 {
+		return "", "", "", "", errors.New(singleFileAtUsage + " (all four options are required)")
+	}
+	seen := map[string]string{}
+	for i := 0; i < len(rest); i += 2 {
+		flag, value := rest[i], rest[i+1]
+		if flag != expectParentFlag && flag != expectFileFlag && flag != handoffFlag && flag != handoffNonceFlag {
+			return "", "", "", "", errors.New(singleFileAtUsage)
+		}
+		if _, dup := seen[flag]; dup {
+			return "", "", "", "", fmt.Errorf("%s given twice; %s", flag, singleFileAtUsage)
+		}
+		switch flag {
+		case handoffFlag:
+			if err := handoff.CheckPath(value); err != nil {
+				return "", "", "", "", fmt.Errorf("%s: %w", flag, err)
+			}
+			seen[flag] = value
+			continue
+		case handoffNonceFlag:
+			if err := handoff.CheckNonce(value); err != nil {
+				return "", "", "", "", fmt.Errorf("%s: %w", flag, err)
+			}
+			seen[flag] = value
+			continue
+		}
+		id, err := editor.ParseParentID(value)
+		if err != nil {
+			return "", "", "", "", fmt.Errorf("%s: %w", flag, err)
+		}
+		seen[flag] = id.String()
+	}
+	return seen[expectParentFlag], seen[expectFileFlag], seen[handoffFlag], seen[handoffNonceFlag], nil
 }
 
 // resolveArgs parses the editor's tiny CLI surface. The argument can be:
@@ -156,12 +349,21 @@ func openHerdRFile(path string, line, col int) error {
 //   - a missing path → assume "explorr foo.go" means "create foo.go" —
 //     same intuition as `vim foo.go` on a non-existent file.
 //
-// Pure function; no IO beyond os.Stat. Returns a result the caller acts
-// on — keeps main() short and lets tests pin behavior without launching
+// Returns a result the caller acts on; file-link validation also resolves local
+// host aliases and symlink targets. Tests pin behavior without launching
 // a real tcell screen.
 func resolveArgs(args []string) cliResult {
 	if len(args) == 0 {
 		return cliResult{Action: actionEdit, RootDir: "."}
+	}
+	// The identity triple qualifies only a dedicated --single-file-at launch; on
+	// any other action it would be silently ignored, so it is refused instead.
+	if args[0] != "--single-file-at" {
+		for _, arg := range args {
+			if arg == expectParentFlag || arg == expectFileFlag || arg == handoffFlag {
+				return cliResult{Err: errors.New(arg + " is only valid after --single-file-at FILE LINE COL")}
+			}
+		}
 	}
 	switch args[0] {
 	case "--version", "-v", "-V", "version":
@@ -208,29 +410,38 @@ func resolveArgs(args []string) cliResult {
 		if len(args) != 2 {
 			return cliResult{Err: errors.New("--herdr-open needs one local file URL")}
 		}
-		path, line, col, err := parseLocalFileURL(args[1])
+		path, line, col, review, err := parseLocalFileURL(args[1])
 		if err != nil {
 			return cliResult{Err: err}
 		}
-		return cliResult{Action: actionHerdROpen, OpenFile: path, OpenLine: line, OpenCol: col}
+		return cliResult{Action: actionHerdROpen, OpenFile: path, OpenLine: line, OpenCol: col, ReviewFile: review}
 	case "--single-file-at":
-		if len(args) != 4 {
-			return cliResult{Err: errors.New("--single-file-at needs a file, line, and column")}
+		// FILE LINE COL plus the REQUIRED triple; the bare form is refused.
+		if len(args) < 4 {
+			return cliResult{Err: errors.New(singleFileAtUsage)}
 		}
-		if err := validateExistingFile(args[1]); err != nil {
-			return cliResult{Err: err}
-		}
-		line, err := positivePosition(args[2], "line")
+		expectParent, expectFile, handoffDir, nonce, err := parseHandoffTriple(args[4:])
 		if err != nil {
 			return cliResult{Err: err}
 		}
-		col, err := positivePosition(args[3], "column")
-		if err != nil {
+		// FILE is the sender's single resolution: never stat'ed or resolved
+		// here; the receiver binds it no-follow relative to its parent.
+		if err := handoff.CheckPath(args[1]); err != nil {
 			return cliResult{Err: err}
+		}
+		line, lineErr := positivePosition(args[2], "line")
+		if lineErr != nil {
+			return cliResult{Err: lineErr}
+		}
+		col, colErr := positivePosition(args[3], "column")
+		if colErr != nil {
+			return cliResult{Err: colErr}
 		}
 		return cliResult{
 			Action: actionEdit, RootDir: filepath.Dir(args[1]), OpenFile: args[1],
-			OpenLine: line, OpenCol: col,
+			OpenLine: line, OpenCol: col, Isolated: true,
+			ExpectParent: expectParent, ExpectFile: expectFile, Handoff: handoffDir,
+			HandoffNonce: nonce,
 		}
 	case "--debug":
 		// Drive an ALREADY-RUNNING editor's debugger. Same mechanism as
@@ -297,6 +508,9 @@ Usage:
   explorr <file>                  Open a file (its parent becomes the project root).
   explorr --explorer [directory]  Open HerdR's file-tree-only workspace sidebar.
   explorr --open-at F:L[:C]       Ask a RUNNING editor to jump to that location.
+  explorr --herdr-open FILE_URL  Open a local regular file in the originating HerdR workspace.
+                                  Positions: #LINE or ?line=N&col=N; ?review=1 opts into Reviewr.
+                                  Markdown always requires the deployment-provided Reviewr helper.
   explorr --debug ACTION          Drive a RUNNING editor's debugger. ACTION is one of
                                   start, continue, next, stepIn, stepOut, pause, stop,
                                   or toggle-breakpoint FILE:LINE.
@@ -350,7 +564,7 @@ func main() {
 		}
 		return
 	case actionHerdROpen:
-		if err := openHerdRFile(res.OpenFile, res.OpenLine, res.OpenCol); err != nil {
+		if err := openHerdRFile(res.OpenFile, res.OpenLine, res.OpenCol, res.ReviewFile); err != nil {
 			fmt.Fprintln(os.Stderr, "explorr:", err)
 			os.Exit(1)
 		}
@@ -388,6 +602,9 @@ func main() {
 	switch {
 	case res.Action == actionExplorer:
 		a, err = app.NewExplorer(res.RootDir)
+	case res.Isolated:
+		// resolveArgs never yields Isolated without the full triple.
+		a, err = app.NewIsolatedSingleFileAtExpecting(res.OpenFile, res.OpenLine, res.OpenCol, res.ExpectParent, res.ExpectFile, res.Handoff, res.HandoffNonce)
 	case res.OpenFile != "":
 		a, err = app.NewSingleFileAt(res.OpenFile, res.OpenLine, res.OpenCol)
 	default:

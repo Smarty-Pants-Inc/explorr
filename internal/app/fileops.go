@@ -20,6 +20,10 @@
 // All three operations refresh the file tree afterwards so the sidebar
 // reflects the change immediately, without waiting for the 10-second
 // background poller.
+//
+// Isolated link/edit panes refuse every one of them (refuseIsolated), both at
+// the menu/context entry and at the do* execution point a pending prompt or
+// confirmation reaches: they mutate by pathname, which a swap can redirect.
 
 package app
 
@@ -104,6 +108,9 @@ func deletePath(path string) error {
 // directories must already exist; we don't silently mkdir to avoid
 // creating folders the user didn't realise they were making.
 func (a *App) doCreateFile(parent, name string) {
+	if a.refuseIsolated("New file") {
+		return
+	}
 	name = trimSpace(name)
 	if name == "" {
 		return
@@ -131,6 +138,9 @@ func (a *App) doCreateFile(parent, name string) {
 // doRenameFile renames oldPath to a sibling whose basename is newName,
 // refreshing the tree and updating any open tab that points at the file.
 func (a *App) doRenameFile(oldPath, newName string) {
+	if a.refuseIsolated("Rename") {
+		return
+	}
 	newName = trimSpace(newName)
 	if newName == "" {
 		return
@@ -173,6 +183,9 @@ func (a *App) doRenameFile(oldPath, newName string) {
 // "is this tab orphaned?" check so the loop reads as the rule it's
 // enforcing rather than path arithmetic.
 func (a *App) doDeletePath(path string) {
+	if a.refuseIsolated("Delete") {
+		return
+	}
 	if err := deletePath(path); err != nil {
 		a.flash(fmt.Sprintf("Delete failed: %v", err))
 		return
@@ -203,6 +216,9 @@ func (a *App) doDeletePath(path string) {
 // a prompt rooted at a path that no longer exists.
 func (a *App) menuNewFile() {
 	a.closeMenu()
+	if a.refuseIsolated("New file") {
+		return
+	}
 	folder := a.activeFolder
 	if folder == "" {
 		folder = a.rootDir
@@ -271,6 +287,9 @@ func (a *App) relativeFolderLabel(folder string) string {
 // disabled for them anyway via hasSavableTab.
 func (a *App) menuRename() {
 	a.closeMenu()
+	if a.refuseIsolated("Rename file") {
+		return
+	}
 	tab := a.activeTabPtr()
 	if tab == nil || tab.Path == "" {
 		return
@@ -290,6 +309,9 @@ func (a *App) menuRename() {
 // file from disk and closes the tab.
 func (a *App) menuDelete() {
 	a.closeMenu()
+	if a.refuseIsolated("Delete file") {
+		return
+	}
 	tab := a.activeTabPtr()
 	if tab == nil || tab.Path == "" {
 		return
@@ -316,6 +338,9 @@ func (a *App) menuDelete() {
 // prefix matching with the trailing separator avoids the
 // /proj/foo vs /proj/foobar collision a substring match would hit.
 func (a *App) doRenameFolder(oldPath, newName string) {
+	if a.refuseIsolated("Rename folder") {
+		return
+	}
 	newName = trimSpace(newName)
 	if newName == "" {
 		return
@@ -370,6 +395,9 @@ func (a *App) doRenameFolder(oldPath, newName string) {
 // rooted on the working dir itself.
 func (a *App) menuRenameFolder() {
 	a.closeMenu()
+	if a.refuseIsolated("Rename folder") {
+		return
+	}
 	folder := a.activeFolder
 	if folder == "" || folder == a.rootDir {
 		return
@@ -424,6 +452,9 @@ func (a *App) renameFolderLabel() string {
 // it would be destructive enough to take down the whole session.
 func (a *App) menuDeleteFolder() {
 	a.closeMenu()
+	if a.refuseIsolated("Delete folder") {
+		return
+	}
 	folder := a.activeFolder
 	if folder == "" || folder == a.rootDir {
 		return
@@ -495,6 +526,9 @@ func (a *App) hasActiveSubfolder() bool {
 // folder is auto-expanded so the new file is visible immediately after the
 // post-create tree refresh.
 func ctxNewFile(a *App, n *filetree.Node) {
+	if a.refuseIsolated("New file") {
+		return
+	}
 	if !n.IsDir {
 		return
 	}
@@ -515,6 +549,9 @@ func ctxNewFile(a *App, n *filetree.Node) {
 // ctxRename opens a prompt pre-filled with n's basename and renames the
 // file or folder on submit.
 func ctxRename(a *App, n *filetree.Node) {
+	if a.refuseIsolated("Rename") {
+		return
+	}
 	if n == a.tree.Root {
 		return
 	}
@@ -621,6 +658,9 @@ func ctxCopyAbsolutePath(a *App, n *filetree.Node) {
 // much higher than a single-file delete and the user should see that
 // before clicking Yes. The project root itself is never deletable.
 func ctxDelete(a *App, n *filetree.Node) {
+	if a.refuseIsolated("Delete") {
+		return
+	}
 	if n == a.tree.Root {
 		return
 	}

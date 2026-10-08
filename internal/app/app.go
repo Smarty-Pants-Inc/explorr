@@ -408,6 +408,15 @@ type App struct {
 	theme    theme.Theme
 	explorer bool
 
+	// isolated link/edit panes accept local actions, never global panel requests.
+	// Their shared publishers/store stay nil so they cannot overwrite another editor's state.
+	// Root containment and sequence floors cannot attribute a sibling's fresh request.
+	isolated bool
+	// initialTab is the handoff receiver's already bound, checked and
+	// acknowledged tab, registered by the constructor's first openFile; nil
+	// once construction finishes.
+	initialTab *editor.Tab
+
 	rootDir   string
 	tree      *filetree.Tree
 	tabs      []*editor.Tab
@@ -694,7 +703,8 @@ type App struct {
 	quit bool
 }
 
-func newScreen(th theme.Theme) (tcell.Screen, error) {
+// newScreen creates the terminal screen; tests substitute a simulation to exercise constructors.
+var newScreen = func(th theme.Theme) (tcell.Screen, error) {
 	scr, err := tcell.NewScreen()
 	if err != nil {
 		return nil, err
@@ -771,9 +781,37 @@ func NewSingleFile(filePath string) (*App, error) {
 
 // NewSingleFileAt opens one file and places the cursor at a 1-based location.
 func NewSingleFileAt(filePath string, line, col int) (*App, error) {
+	return newSingleFileAt(filePath, line, col, false, nil)
+}
+
+// NewIsolatedSingleFileAtExpecting is the --single-file-at receiver of handoff
+// contract v3: a dedicated link/edit pane at a 1-based location that neither
+// accepts shared open/debug requests nor loads/publishes shared editor state.
+// filePath must be absolute and normalized and is never resolved. Before any
+// screen exists, ReceiveHandoff binds filePath relative to its held parent with
+// O_NOFOLLOW, requires the held parent and original to be exactly parentID and
+// fileID, and creates handoffDir/ack carrying nonce; only then is the UI started and the tab
+// registered. Any failure (swap, mismatch, read-only preview, invalidated
+// HANDOFF) fails closed: nil app, an error, no tab, no writes.
+func NewIsolatedSingleFileAtExpecting(filePath string, line, col int, parentID, fileID, handoffDir, nonce string) (*App, error) {
+	tab, err := ReceiveHandoff(filePath, parentID, fileID, handoffDir, nonce)
+	if err != nil {
+		return nil, err
+	}
+	return newSingleFileAt(filePath, line, col, true, tab)
+}
+
+// newSingleFileAt establishes channel ownership before bootstrap or opening a tab.
+// Isolated panes keep breakpoint/debug models local, without shared persistence.
+// bound, when non-nil, is the receiver's acknowledged tab for filePath; it is
+// registered instead of loading filePath again (see openFile).
+func newSingleFileAt(filePath string, line, col int, isolated bool, bound *editor.Tab) (*App, error) {
 	th := theme.Default()
 	scr, err := newScreen(th)
 	if err != nil {
+		if bound != nil {
+			_ = bound.Close()
+		}
 		return nil, err
 	}
 
@@ -783,37 +821,56 @@ func NewSingleFileAt(filePath string, line, col int) (*App, error) {
 	}
 
 	a := &App{
-		screen: scr,
-		theme:  th,
+		screen:     scr,
+		theme:      th,
+		isolated:   isolated,
+		initialTab: bound,
 		// Absolute for the same reason as above; single-file mode has no tree to borrow it from.
 		rootDir:        absOr(rootDir),
-		active:         state.NewPublisher(),
-		bpStore:        state.NewBreakpointStore(),
-		debugPub:       state.NewDebugPublisher(),
 		lastDebugSeq:   debugRequestFloor,
 		tree:           nil,
 		hoveredMenuRow: -1,
 		sidebarShown:   false,
 		sidebarWidth:   defaultSidebarWidth,
 	}
-	a.breakpoints = loadPersistedBreakpoints(a.rootDir)
+	if !isolated {
+		a.active = state.NewPublisher()
+		a.bpStore = state.NewBreakpointStore()
+		a.debugPub = state.NewDebugPublisher()
+		a.breakpoints = loadPersistedBreakpoints(a.rootDir)
+	}
 	a.setActiveFolder(rootDir)
 	a.loadConfig()
 	a.loadCustomActions()
 	// openFile loads the file's git gutter markers itself (a file-scoped
 	// `git diff`), so single-file mode shows change bars on open without
 	// the whole-repo status or tree walk that New performs.
-	a.openFileAt(filePath, line, col)
+	err = a.openFileAt(filePath, line, col)
+	// One-shot: later explicit navigation opens other files in other parents.
+	if a.initialTab != nil {
+		_ = a.initialTab.Close()
+		a.initialTab = nil
+		if err == nil {
+			err = fmt.Errorf("bound tab for %s was not registered", filePath)
+		}
+	}
+	if err != nil {
+		a.Close()
+		return nil, err
+	}
 	return a, nil
 }
 
-func (a *App) openFileAt(path string, line, col int) {
-	a.openFile(path)
-	tab := a.activeTabPtr()
-	if tab == nil {
-		return
+// openFileAt positions the requested tab only after it was safely opened.
+func (a *App) openFileAt(path string, line, col int) error {
+	if err := a.openFile(path); err != nil {
+		return err
 	}
-	tab.MoveCursorTo(editor.Position{Line: max(1, line) - 1, Col: max(1, col) - 1}, false)
+	tab := a.activeTabPtr()
+	if tab != nil {
+		tab.MoveCursorTo(editor.Position{Line: max(1, line) - 1, Col: max(1, col) - 1}, false)
+	}
+	return nil
 }
 
 // loadCustomActions reads the user's actions.json (if any) and stores
@@ -960,10 +1017,21 @@ func (a *App) stopTreeRefresh() {
 	}
 }
 
-// Close releases the terminal back to the user. Always call this before exit.
+// closeTabs releases held originals without changing the retained tab models.
+// Tab.Close is idempotent and harmless for ordinary or generated tabs.
+func (a *App) closeTabs() {
+	for _, tab := range a.tabs {
+		if err := tab.Close(); err != nil {
+			a.flash(fmt.Sprintf("Close failed: %v", err))
+		}
+	}
+}
+
+// Close releases tab handles and the terminal. Always call this before exit.
 func (a *App) Close() {
 	a.stopTreeRefresh()
 	a.stopAutoScroll()
+	a.closeTabs()
 	if a.screen != nil {
 		a.screen.Fini()
 	}
@@ -974,6 +1042,7 @@ func (a *App) Close() {
 // lets trackpad events outrun the renderer and turns a flick into a delayed,
 // stair-stepped queue; batching keeps the viewport current with the gesture.
 func (a *App) Run() error {
+	defer a.closeTabs()
 	a.width, a.height = a.screen.Size()
 	if !a.explorer {
 		a.startLSP()
@@ -997,18 +1066,20 @@ func (a *App) Run() error {
 			time.Sleep(wait)
 			a.handlePendingEvents()
 		}
-		a.draw()
 		if !a.explorer {
+			// Apply shared mutations before drawing or publishing: the visible
+			// frame and companion snapshots must describe the selected target.
+			a.consumeOpenRequest()
+			a.consumeDebugRequest()
 			// syncBreakpoints runs BEFORE publishDebug: the panel's breakpoint list
 			// comes out of a.breakpoints, and publishing first would mirror a set
 			// that is one event behind the marks the user can see in the gutter.
 			a.syncBreakpoints()
 			a.publishActive()
 			a.publishDebug()
-			a.consumeOpenRequest()
-			a.consumeDebugRequest()
 			a.maybeSyncLSP()
 		}
+		a.draw()
 		a.screen.Show()
 		lastRender = time.Now()
 	}
@@ -1016,6 +1087,8 @@ func (a *App) Run() error {
 	if a.explorer {
 		return nil
 	}
+	// Isolated panes have nil channels; Set/Flush are nil-safe, so local debug
+	// teardown still runs without publishing idle or flushing shared state.
 	a.active.Flush() // do not lose the final position inside the debounce window
 	// 🔴 The CLEAN-EXIT half of the staleness contract, and it belongs in this
 	// block rather than beside stopDebugSession below: a panel that outlives the
@@ -1075,11 +1148,13 @@ func (a *App) publishActive() {
 // it in a real editor with a language server attached — rather than reading the
 // diff in one pane and hunting for the line in another.
 //
-// The sequence number is the whole guard. Without it the editor either reopens
-// the same file on every tick or ignores every request after the first; with it
-// a request is honoured exactly once, and a stale file left on disk from an
-// earlier session can never yank the user somewhere they did not ask to go.
+// The sequence number prevents replay within this editor, not attribution:
+// ordinary editors honour a stale request once at startup. Dedicated link/edit
+// panes instead bypass all shared requests at both receiver entry points.
 func (a *App) consumeOpenRequest() {
+	if a.isolated {
+		return // leave the shared request available to ordinary editors
+	}
 	req, ok := state.ReadOpenRequest()
 	if !ok || req.Seq <= a.lastOpenSeq {
 		return
@@ -1163,6 +1238,8 @@ func (a *App) handleEvent(ev tcell.Event) {
 		a.flash(e.msg)
 	case *customActionDoneEvent:
 		a.handleCustomActionDone(e)
+	case *explorerOpenDoneEvent:
+		a.handleExplorerOpenDone(e)
 	case *formatDoneEvent:
 		a.handleFormatDone(e)
 	case *finderRebuiltEvent:
@@ -2325,10 +2402,11 @@ func (a *App) flash(msg string) {
 func (a *App) OpenFile(path string) { a.openFile(path) }
 
 // openFile opens the file at path in a new tab — or switches to it if it is
-// already open in another tab. Errors are surfaced as a flash message.
+// already open in another tab. Errors are returned and flashed; editable isolated
+// tabs must bind their loaded original before registration or any git/LSP use.
 // Whatever the path resolves to, its parent becomes the active folder so
 // the next New File from the main menu lands next to it.
-func (a *App) openFile(path string) {
+func (a *App) openFile(path string) error {
 	if abs, err := filepath.Abs(path); err == nil {
 		path = abs
 	}
@@ -2353,14 +2431,44 @@ func (a *App) openFile(path string) {
 		if t.Path == path {
 			a.activeTab = i
 			a.refreshTabGitState(t)
-			return
+			return nil
 		}
+	}
+	// The handoff receiver's tab was already bound, checked and acknowledged
+	// for exactly this path; register THAT object instead of loading again.
+	if t := a.initialTab; t != nil {
+		a.initialTab = nil
+		if t.Path != path {
+			_ = t.Close()
+			err := fmt.Errorf("cannot open %s: bound tab is for %s", path, t.Path)
+			a.flash(fmt.Sprintf("Error: %v", err))
+			return err
+		}
+		a.registerTab(t)
+		return nil
 	}
 	t, err := editor.NewTab(path)
 	if err != nil {
 		a.flash(fmt.Sprintf("Error: %v", err))
-		return
+		return err
 	}
+	// Read-only previews cannot write through Save; only editable disk tabs bind.
+	if a.isolated && !t.IsImage() && !t.Synthetic {
+		if err := t.BindOriginal(); err != nil {
+			_ = t.Close()
+			err = fmt.Errorf("cannot bind %s: %w", path, err)
+			a.flash(fmt.Sprintf("Error: %v", err))
+			return err
+		}
+	}
+	a.registerTab(t)
+	return nil
+}
+
+// registerTab makes an opened (and, if isolated, bound) tab active and only
+// then hands it to git and the LSP.
+func (a *App) registerTab(t *editor.Tab) {
+	path := t.Path
 	a.tabs = append(a.tabs, t)
 	a.activeTab = len(a.tabs) - 1
 	a.refreshTabGitState(t)
@@ -2406,7 +2514,11 @@ func (a *App) saveTabAt(idx int) bool {
 	// formatter never blocks the user's save from landing. The
 	// formatter (when configured + trusted) reloads the buffer
 	// asynchronously via formatDoneEvent — see format.go.
-	a.runFormatOnSave(idx)
+	// ponytail: a pathname formatter would undo identity-bound saving if the
+	// path changed after the verified write. Exact-file panes skip it entirely.
+	if !a.isolated {
+		a.runFormatOnSave(idx)
+	}
 	return true
 }
 
@@ -2478,6 +2590,9 @@ func (a *App) closeTab(idx int) {
 		return
 	}
 	a.lspDidClose(a.tabs[idx].Path)
+	if err := a.tabs[idx].Close(); err != nil {
+		a.flash(fmt.Sprintf("Close failed: %v", err))
+	}
 	a.tabs = append(a.tabs[:idx], a.tabs[idx+1:]...)
 	if a.activeTab >= len(a.tabs) {
 		a.activeTab = len(a.tabs) - 1
@@ -2754,6 +2869,10 @@ func (a *App) runCustomAction(idx int) {
 		return
 	}
 	act := a.customActions[idx]
+	// User shell receives $FILE as a mutable pathname Explorr cannot bind.
+	if a.refuseIsolated(act.Label) {
+		return
+	}
 
 	// No "is a file open?" guard: custom actions are user-defined
 	// shell, and we don't second-guess what their command line
@@ -2775,6 +2894,10 @@ func (a *App) runCustomAction(idx int) {
 // runCustomAction so both the prompt-less and prompted paths share
 // the env-var, logging, and event-posting wiring without diverging.
 func (a *App) execCustomAction(act customactions.Action, promptValues map[string]string) {
+	// Final point: a prompt form opened before the refusal still cannot run.
+	if a.refuseIsolated(act.Label) {
+		return
+	}
 	vars := a.captureActionVars()
 	env := append(os.Environ(), vars.envSlice()...)
 	env = append(env, promptValuesEnv(act.Prompts, promptValues)...)

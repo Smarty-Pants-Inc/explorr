@@ -165,6 +165,40 @@ func TestTab_Save_WritesAndClearsDirty(t *testing.T) {
 	}
 }
 
+// TestTab_Save_UnboundSymlinkNegativeControl reproduces the old isolated-editor
+// vulnerability and pins the ordinary editor's intentionally unchanged behavior.
+func TestTab_Save_UnboundSymlinkNegativeControl(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
+	pathA, pathB := filepath.Join(dir, "A.txt"), filepath.Join(dir, "B.txt")
+	for path, text := range map[string]string{pathA: "original A", pathB: "untouched B"} {
+		if err := os.WriteFile(path, []byte(text), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tab, err := NewTab(pathA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tab.InsertString("edit ")
+	if err := os.Remove(pathA); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(pathB, pathA); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := tab.Save(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(pathB)
+	if err != nil || string(got) != "edit original A" {
+		t.Fatalf("old unbound save should redirect to B: %q, %v", got, err)
+	}
+	if tab.Path != pathA || tab.Dirty {
+		t.Fatal("ordinary save path/dirty semantics changed")
+	}
+}
+
 // TestTab_Save_NoPath rejects saving an untitled tab — caller must prompt.
 func TestTab_Save_NoPath(t *testing.T) {
 	tab := &Tab{Buffer: NewBuffer("hi")}

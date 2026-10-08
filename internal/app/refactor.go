@@ -105,6 +105,9 @@ func (a *App) handleReferences(e *referencesEvent) {
 // menuRenameSymbol prompts for the new name and applies the server's edits.
 func (a *App) menuRenameSymbol() {
 	a.closeMenu()
+	if a.refuseIsolated("Rename symbol") {
+		return
+	}
 	if _, _, ok := a.lspCursorPos(); !ok {
 		a.flash("No language server for this file")
 		return
@@ -115,6 +118,9 @@ func (a *App) menuRenameSymbol() {
 
 // renameSubmit fires the request once the user has typed a name.
 func (a *App) renameSubmit(newName string) {
+	if a.refuseIsolated("Rename symbol") {
+		return
+	}
 	path, pos, ok := a.lspCursorPos()
 	if !ok {
 		return
@@ -135,6 +141,9 @@ func (a *App) renameSubmit(newName string) {
 
 // handleRename applies the workspace edit.
 func (a *App) handleRename(e *renameEvent) {
+	if a.refuseIsolated("Rename symbol") {
+		return
+	}
 	if e.err != nil {
 		a.flash("Rename failed: " + e.err.Error())
 		return
@@ -149,9 +158,25 @@ func (a *App) handleRename(e *renameEvent) {
 		a.flash("Save before renaming — the edit rewrites files on disk")
 		return
 	}
-	files, count, err := applyWorkspaceEdits(e.edits)
+	a.applyEditsAndReload(e.edits, "Rename symbol", func(files, count int, err error) string {
+		if err != nil {
+			return "Rename failed: " + err.Error()
+		}
+		return fmt.Sprintf("Renamed to %s — %d edit(s) across %d file(s)", e.newName, count, files)
+	})
+}
+
+// applyEditsAndReload is the ONE place rename and fix-at-cursor write files.
+// It writes by pathname, then reloads every touched open tab so buffers match
+// disk; report formats the flash for success or failure. Isolated panes refuse
+// here too: the pathname writer would follow a swapped symlink or parent.
+func (a *App) applyEditsAndReload(edits map[string][]lsp.TextEdit, action string, report func(files, count int, err error) string) {
+	if a.refuseIsolated(action) {
+		return
+	}
+	files, count, err := applyWorkspaceEdits(edits)
 	if err != nil {
-		a.flash("Rename failed: " + err.Error())
+		a.flash(report(files, count, err))
 		return
 	}
 	// Any open tab may now disagree with disk, so pull each one back in.
@@ -159,12 +184,12 @@ func (a *App) handleRename(e *renameEvent) {
 		if t.Path == "" || t.Synthetic {
 			continue
 		}
-		if _, touched := e.edits[t.Path]; touched {
+		if _, touched := edits[t.Path]; touched {
 			_ = t.Reload()
 		}
 	}
 	a.refreshGitStatus()
-	a.flash(fmt.Sprintf("Renamed to %s — %d edit(s) across %d file(s)", e.newName, count, files))
+	a.flash(report(files, count, nil))
 }
 
 // applyWorkspaceEdits writes every edit to disk, per file, back to front.

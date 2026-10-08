@@ -63,7 +63,8 @@ func (e *formatDoneEvent) When() time.Time { return e.when }
 // (so a typo isn't silently ignored) but never block the save itself
 // — that already happened before this function was called.
 func (a *App) runFormatOnSave(idx int) {
-	if idx < 0 || idx >= len(a.tabs) {
+	// Isolated panes never format (saveTabAt skips this); defence in depth.
+	if a.isolated || idx < 0 || idx >= len(a.tabs) {
 		return
 	}
 	tab := a.tabs[idx]
@@ -176,7 +177,7 @@ func (a *App) maybeOfferInstall(idx int, tabPath string) {
 // looks like after an external edit between the prompt and the
 // answer. Same defense as the (path, hash) trust key itself.
 func (a *App) openFormatTrustPrompt(idx int, cfg *format.Config, argv []string) {
-	if idx < 0 || idx >= len(a.tabs) {
+	if a.isolated || idx < 0 || idx >= len(a.tabs) {
 		return
 	}
 	tab := a.tabs[idx]
@@ -218,7 +219,7 @@ func (a *App) openFormatTrustPrompt(idx int, cfg *format.Config, argv []string) 
 // substituteFile, mirroring the path Config.CommandFor takes for
 // already-installed entries.
 func (a *App) openFormatInstallPrompt(idx int, ext string, argvTemplate []string) {
-	if idx < 0 || idx >= len(a.tabs) {
+	if a.isolated || idx < 0 || idx >= len(a.tabs) {
 		return
 	}
 	tab := a.tabs[idx]
@@ -318,7 +319,9 @@ func (a *App) persistTrust(root, hash string, trusted bool) {
 // not available: each arg is passed as-is to execve, no shell
 // interpretation, no globbing, no command chaining.
 func (a *App) execFormatter(tabPath string, argv []string) {
-	if len(argv) == 0 {
+	// A pathname formatter would follow a swapped symlink/parent, so linked
+	// single-file panes never run one, even from an already-open prompt.
+	if a.isolated || len(argv) == 0 {
 		return
 	}
 	scr := a.screen
