@@ -1,6 +1,7 @@
 # Compiled binaries.
 /bin/
 /dist/
+/herdr/bin/
 
 # macOS metadata.
 .DS_Store

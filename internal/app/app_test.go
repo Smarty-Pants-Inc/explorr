@@ -3003,6 +3003,7 @@ func TestOpenFileInHerdRSplitTargetsCapturedSourcePane(t *testing.T) {
 printf '%s\n' "$*" >> "$HERDR_TEST_LOG"
 case "$1:$2" in
   pane:split) printf '%s\n' '{"result":{"pane":{"pane_id":"wA:p2"}}}' ;;
+  pane:run) h=${4##*"--handoff '"}; h=${h%%"'"*}; n=${4##*"--handoff-nonce '"}; n=${n%"'"}; f=${4##*"--expect-file '"}; f=${f%%"'"*}; printf '%s %s\n' "$n" "$f" > "$h/ack"; printf '%s\n' '{"result":{}}' ;;
   *) printf '%s\n' '{"result":{}}' ;;
 esac
 `
@@ -3011,10 +3012,15 @@ esac
 	}
 	t.Setenv("HERDR_TEST_LOG", logPath)
 	t.Setenv("HERDR_WORKSPACE_ID", "ambient-workspace")
+	t.Setenv("HERDR_TAB_ID", "ambient-workspace:t9")
+	t.Setenv("HERDR_PLUGIN_CONTEXT_JSON", `{"workspace_id":"ambient-workspace","tab_id":"ambient-workspace:t9","focused_pane_id":"ambient-workspace:p8"}`)
 	t.Setenv("HERDR_PANE_ID", "wA:p7")
 	t.Setenv("HERDR_BIN_PATH", fakeHerdr)
 
 	file := filepath.Join(dir, "odd file's.go")
+	if err := os.WriteFile(file, []byte("package odd\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := OpenFileInHerdRSplit(file, 12, 4); err != nil {
 		t.Fatal(err)
 	}
@@ -3026,64 +3032,31 @@ esac
 	if len(calls) != 2 {
 		t.Fatalf("calls = %q, want split/run", calls)
 	}
-	if want := "pane split wA:p7 --direction right --cwd " + dir + " --focus"; calls[0] != want {
+	if want := "pane split --pane wA:p7 --direction right --cwd " + dir + " --no-focus"; calls[0] != want {
 		t.Fatalf("split call = %q, want %q", calls[0], want)
 	}
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantRun := "pane run wA:p2 exec " + shellQuote(executable) + " --single-file-at " + shellQuote(file) + " 12 4"
-	if calls[1] != wantRun {
+	wantRun := "pane run wA:p2 exec " + shellQuote(executable) + " --single-file-at " + shellQuote(file) + " 12 4 --expect-parent "
+	if !strings.HasPrefix(calls[1], wantRun) || !strings.Contains(calls[1], " --expect-file '") || !strings.Contains(calls[1], " --handoff '") {
 		t.Fatalf("run call = %q, want %q", calls[1], wantRun)
 	}
 }
 
-func TestOpenFileInHerdRSplitTargetsPluginWorkspace(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses a POSIX fake herdr executable")
-	}
-	dir := t.TempDir()
-	logPath := filepath.Join(dir, "calls.log")
-	contextPath := filepath.Join(dir, "context.log")
-	fakeHerdr := filepath.Join(dir, "herdr")
-	script := `#!/bin/sh
-printf '%s|%s\n' "$HERDR_PANE_ID" "$HERDR_WORKSPACE_ID" >> "$HERDR_TEST_CONTEXT_LOG"
-printf '%s\n' "$*" >> "$HERDR_TEST_LOG"
-case "$1:$2" in
-  pane:split) printf '%s\n' '{"result":{"pane":{"pane_id":"wA:p2"}}}' ;;
-  *) printf '%s\n' '{"result":{}}' ;;
-esac
-`
-	if err := os.WriteFile(fakeHerdr, []byte(script), 0755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("HERDR_TEST_LOG", logPath)
-	t.Setenv("HERDR_TEST_CONTEXT_LOG", contextPath)
-	t.Setenv("HERDR_WORKSPACE_ID", "ambient-workspace")
+func TestOpenFileInHerdRSplitRejectsLegacyPluginOrigin(t *testing.T) {
+	t.Setenv("HERDR_WORKSPACE_ID", "wA")
+	t.Setenv("HERDR_TAB_ID", "wA:t1")
+	t.Setenv("HERDR_PLUGIN_CONTEXT_JSON", `{"focused_pane_id":"wA:p1"}`)
 	t.Setenv("HERDR_PANE_ID", "wA:plugin")
-	t.Setenv("HERDR_BIN_PATH", fakeHerdr)
+	// An unusable CLI would report a different error if the legacy sidebar
+	// attempted a workspace or focused-pane fallback.
+	t.Setenv("HERDR_BIN_PATH", filepath.Join(t.TempDir(), "must-not-run"))
 
-	if err := OpenFileInHerdRSplit(filepath.Join(dir, "file.go"), 1, 1); err != nil {
-		t.Fatal(err)
-	}
-	logBytes, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	calls := strings.Split(strings.TrimSpace(string(logBytes)), "\n")
-	if len(calls) != 2 {
-		t.Fatalf("calls = %q, want split/run", calls)
-	}
-	if want := "pane split --workspace wA --direction right --cwd " + dir + " --focus"; calls[0] != want {
-		t.Fatalf("split call = %q, want %q", calls[0], want)
-	}
-	context, err := os.ReadFile(contextPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := strings.TrimSpace(string(context)), "wA:plugin|ambient-workspace\nwA:plugin|ambient-workspace"; got != want {
-		t.Fatalf("HerdR context = %q, want %q", got, want)
+	err := OpenFileInHerdRSplit("file.go", 1, 1)
+	if err == nil || !strings.Contains(err.Error(), "legacy sidebar") {
+		t.Fatalf("legacy origin error = %v", err)
 	}
 }
 
@@ -3109,6 +3082,9 @@ esac
 	t.Setenv("HERDR_PANE_ID", "wA:p1")
 	t.Setenv("HERDR_BIN_PATH", fakeHerdr)
 
+	if err := os.WriteFile(filepath.Join(dir, "file.go"), []byte("package f\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	err := OpenFileInHerdRSplit(filepath.Join(dir, "file.go"), 1, 1)
 	if err == nil || !strings.Contains(err.Error(), "editor run failed") {
 		t.Fatalf("run failure = %v, want editor error", err)

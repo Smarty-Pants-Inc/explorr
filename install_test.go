@@ -27,6 +27,9 @@ func TestHerdRManagedInstallUsesManagerBinaryAndBuildsHostBinaryDespiteGOENV(t *
 	if err := os.WriteFile(filepath.Join(pluginRoot, "install.sh"), script, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(pluginRoot, "herdr-plugin.toml"), herdrPluginManifest, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/current-checkout\n\ngo 1.24.0\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +37,7 @@ func TestHerdRManagedInstallUsesManagerBinaryAndBuildsHostBinaryDespiteGOENV(t *
 		t.Fatal(err)
 	}
 	tools := t.TempDir()
-	if err := os.WriteFile(filepath.Join(tools, "jq"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(tools, "jq"), []byte("#!/bin/sh\ngrep -q '\"pattern\":\"^file://\"'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(tools, "herdr"), []byte("#!/bin/sh\nprintf '%s\\n' 'old HerdR'\n"), 0o755); err != nil {
@@ -42,14 +45,33 @@ func TestHerdRManagedInstallUsesManagerBinaryAndBuildsHostBinaryDespiteGOENV(t *
 	}
 	outerHerdR := filepath.Join(t.TempDir(), "outer-herdr")
 	if err := os.WriteFile(outerHerdR, []byte(`#!/bin/sh
-case "$1 $2" in
-"plugin install")
+set -eu
+if [ "$1 $2" = "plugin install" ]; then
 	unset HERDR_BIN_PATH
 	HERDR_BUILD_BIN_PATH="$0" exec /bin/sh "$EXPLORR_TEST_HERDR_INSTALL"
+fi
+case "$HERDR_SOCKET_PATH" in
+  *explorr-herdr-capabilities-*/offline.sock) ;;
+  *) echo "probe reached inherited socket" >&2; exit 2 ;;
+esac
+test -z "${HERDR_SESSION:-}${HERDR_PANE_ID:-}${HERDR_TAB_ID:-}${HERDR_WORKSPACE_ID:-}${HERDR_CLIENT_SOCKET_PATH:-}"
+root="${HERDR_SOCKET_PATH%/offline.sock}"
+test "$HOME" = "$root/home"
+test "$XDG_CONFIG_HOME" = "$root/config"
+test "$XDG_DATA_HOME" = "$root/data"
+test "$HERDR_CONFIG_PATH" = "$root/config/herdr/config.toml"
+case "$1 $2" in
+"plugin pane")
+	test "$3 $4" = "open --help"
+	printf '%s\n' '  --placement <PLACEMENT>' '  --target-pane <PANE>' '  --direction <DIRECTION>'
 	;;
-"pane split")
-	test "${3:-}" = "--help" || exit 2
-	printf '%s\n' '  --workspace string'
+"plugin link")
+	test "$4" = "--disabled"
+	grep -q 'min_herdr_version = "0.9.1"' "$3/herdr-plugin.toml"
+	grep -q 'placement = "split"' "$3/herdr-plugin.toml"
+	;;
+"plugin list")
+	printf '{"result":{"plugins":[{"plugin_id":"com.smartypants.explorr","panes":[{"id":"explorer","placement":"split"}],"link_handlers":[{"id":"local-file","pattern":"^file://","action":"open-file"}]}]}}\n'
 	;;
 *)
 	exit 2
@@ -59,6 +81,9 @@ esac
 		t.Fatal(err)
 	}
 	t.Setenv("EXPLORR_TEST_HERDR_INSTALL", filepath.Join(pluginRoot, "install.sh"))
+	for _, key := range []string{"HERDR_SESSION", "HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID", "HERDR_CLIENT_SOCKET_PATH", "HERDR_CONFIG_PATH", "HERDR_SOCKET_PATH"} {
+		t.Setenv(key, "must-not-reach-probe")
+	}
 	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
 	crossOS := "linux"
 	if runtime.GOOS == crossOS {
@@ -167,33 +192,63 @@ func TestHerdRManagedInstallRequiresJQ(t *testing.T) {
 	}
 }
 
-func TestHerdRManagedInstallRequiresWorkspaceSplit(t *testing.T) {
-	pluginRoot := filepath.Join(t.TempDir(), "herdr")
-	if err := os.Mkdir(pluginRoot, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	script, err := os.ReadFile("herdr/install.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(pluginRoot, "install.sh"), script, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	tools := t.TempDir()
-	for _, tool := range []string{"go", "jq"} {
-		if err := os.WriteFile(filepath.Join(tools, tool), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(tools, "herdr"), []byte("#!/bin/sh\nprintf '%s\\n' '  --direction string'\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	cmd := exec.Command("/bin/sh", "install.sh")
-	cmd.Dir = pluginRoot
-	output, err := cmd.CombinedOutput()
-	if err == nil || !strings.Contains(string(output), "pane split --workspace is required") {
-		t.Fatalf("old HerdR returned %v\n%s", err, output)
+func TestHerdRManagedInstallRequiresTargetedSplitAndLinks(t *testing.T) {
+	for _, capability := range []string{"missing-target", "help-failed", "rejected", "missing-handler"} {
+		t.Run(capability, func(t *testing.T) {
+			pluginRoot := filepath.Join(t.TempDir(), "herdr")
+			if err := os.Mkdir(pluginRoot, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			script, err := os.ReadFile("herdr/install.sh")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(pluginRoot, "install.sh"), script, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			tools := t.TempDir()
+			if err := os.WriteFile(filepath.Join(tools, "go"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(tools, "jq"), []byte("#!/bin/sh\ngrep -q '\"pattern\":\"^file://\"'\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			herdr := `#!/bin/sh
+set -eu
+case "$1 $2" in
+  "plugin pane")
+    test "$3 $4" = "open --help"
+    test "$EXPLORR_TEST_CAPABILITY" != "help-failed" || exit 2
+    printf '%s\n' '  --placement <PLACEMENT>' '  --direction <DIRECTION>'
+    if [ "$EXPLORR_TEST_CAPABILITY" != "missing-target" ]; then
+      printf '%s\n' '  --target-pane <PANE>'
+    fi
+    ;;
+  "plugin link")
+    test "$4" = "--disabled"
+    test "$EXPLORR_TEST_CAPABILITY" != "rejected"
+    ;;
+  "plugin list")
+    printf '{"result":{"plugins":[]}}\n'
+    ;;
+  *) exit 2 ;;
+esac
+`
+			if err := os.WriteFile(filepath.Join(tools, "herdr"), []byte(herdr), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("EXPLORR_TEST_CAPABILITY", capability)
+			t.Setenv("HERDR_BUILD_BIN_PATH", "")
+			cmd := exec.Command("/bin/sh", "install.sh")
+			cmd.Dir = pluginRoot
+			output, err := cmd.CombinedOutput()
+			if err == nil || !strings.Contains(string(output), "targeted split plugin panes and local file-link handlers is required") {
+				t.Fatalf("%s HerdR returned %v\n%s", capability, err, output)
+			}
+			if _, err := os.Stat(filepath.Join(pluginRoot, "bin")); !os.IsNotExist(err) {
+				t.Fatalf("%s capability failure started build: %v", capability, err)
+			}
+		})
 	}
 }

@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026 Smarty Pants, Inc. SPDX-License-Identifier: MIT
+"""Open a local file beside its real HerdR origin, never a focused/global pane."""
+
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import stat
+import subprocess
+import sys
+
+
+# HerdR handles include a workspace prefix; aliases such as current are unsafe.
+# Pane numbers use HerdR 0.9.1's public base-32 alphabet (workspace.rs
+# PUBLIC_ID_ALPHABET), so the tenth pane is p A, not p10: w1:pA.
+PANE_ID = re.compile(r"w[A-Za-z0-9_-]+:p[1-9A-HJKMNP-TV-Z0]+\Z")
+# Reviewr's held parent directory and original file, as unsigned DEV:INO.
+DEV_INO = re.compile(r"[0-9]+:[0-9]+\Z")
+# The sender's per-handoff 128-bit secret. It reaches the receiver only through
+# this argv (never the HANDOFF directory); the receiver's ack must carry it.
+NONCE = re.compile(r"[0-9a-f]{32}\Z")
+
+
+def dev_ino(info):
+    """Format an identity exactly as Reviewr and Explorr do."""
+    return f"{info.st_dev & 0xFFFFFFFFFFFFFFFF}:{info.st_ino}"
+
+
+class LaunchError(Exception):
+    """An explicit launch failed; callers must not retry in a global pane."""
+
+
+def executable(path):
+    """Return an absolute executable path, including resolved bundle symlinks."""
+    candidate = Path(path).resolve()
+    if candidate.is_file() and os.access(candidate, os.X_OK):
+        return str(candidate)
+    return None
+
+
+def program_path(edit):
+    """Prefer the helper's own bundle, not an unrelated upstream Reviewr on PATH."""
+    root = Path(__file__).resolve().parent
+    if edit and os.environ.get("EXPLORR_BIN_PATH"):
+        override = Path(os.environ["EXPLORR_BIN_PATH"])
+        if not override.is_absolute() or not executable(override):
+            raise LaunchError("EXPLORR_BIN_PATH must name an absolute executable")
+        return executable(override)
+    name = "explorr" if edit else "herdr-reviewr"
+    candidates = [root / "bin" / name, root / name]
+    if edit:
+        # A source bundle places the existing Explorr plugin beside reviewr/.
+        candidates.append(root.parent / "herdr" / "bin" / name)
+        if os.environ.get("HERDR_PLUGIN_ROOT"):
+            candidates.append(Path(os.environ["HERDR_PLUGIN_ROOT"]) / "bin" / name)
+    for path in candidates:
+        found = executable(path)
+        if found:
+            return found
+    if edit:
+        found = shutil.which(name)
+        if found:
+            return executable(found)
+    raise LaunchError(f"missing bundled {name}; build/install the local bundle first")
+
+
+def run_herdr(binary, *args):
+    """Call the exact manager as argv; only pane run receives quoted shell text."""
+    try:
+        result = subprocess.run([binary, *args], text=True, capture_output=True)
+    except OSError as error:
+        raise LaunchError(f"cannot execute HerdR: {error}") from error
+    if result.returncode:
+        detail = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
+        raise LaunchError(f"{shlex.join([binary, *args])} failed ({result.returncode}): {detail}")
+    return result.stdout
+
+
+def unsafe_path(path):
+    """Match the link parser's control/invalid-UTF-8 refusal for direct callers."""
+    return any(ord(char) < 32 or 127 <= ord(char) <= 159 or 0xD800 <= ord(char) <= 0xDFFF
+               for char in path)
+
+
+def checked_target(file_arg, expected_parent, expected_file):
+    """Check the sender's already-resolved FILE WITHOUT resolving it again.
+
+    The sender (Explorr link/explorer, or Reviewr) identified the file and holds
+    it open until the receiver acknowledges, so its inode cannot be reused.
+    Resolving here would follow a symlink swapped in since, and hand the receiver
+    another file. The receiver re-checks both identities through its own
+    no-follow open."""
+    if not os.path.isabs(file_arg) or os.path.normpath(file_arg) != file_arg:
+        raise LaunchError("FILE must be the sender's absolute normalized path")
+    file = Path(file_arg)
+    try:
+        info = os.lstat(file)
+    except OSError as error:
+        raise LaunchError(f"the file is gone: {error}") from error
+    if not stat.S_ISREG(info.st_mode):
+        raise LaunchError("the file is no longer a regular file (symlink or other); refusing")
+    if dev_ino(info) != expected_file:
+        raise LaunchError("the file was replaced; refusing")
+    if dev_ino(os.stat(file.parent)) != expected_parent:
+        raise LaunchError("the file's directory was replaced; refusing")
+    return file
+
+
+def checked_handoff(handoff):
+    """The sender's private, per-launch acknowledgement directory."""
+    if (not handoff or unsafe_path(handoff) or not os.path.isabs(handoff)
+            or os.path.normpath(handoff) != handoff):
+        raise LaunchError("HANDOFF must be the sender's absolute handoff directory")
+    try:
+        info = os.lstat(handoff)
+    except OSError as error:
+        raise LaunchError(f"HANDOFF is gone: {error}") from error
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+            or info.st_mode & 0o077):
+        raise LaunchError("HANDOFF must be a private (0700) directory owned by this user")
+    return handoff
+
+
+def launch(args, edit=False):
+    """Validate before splitting, launch once, and clean up only our new pane."""
+    # Every route carries the identities of the file and its directory, held open
+    # by the sender, plus the handoff directory the receiver acknowledges in and
+    # the sender's nonce the receiver's ack must carry.
+    if len(args) != 7:
+        raise LaunchError("usage: FILE LINE COL PARENT_ID FILE_ID HANDOFF NONCE"
+                          " (positive, 1-based coordinates)")
+    source = os.environ.get("HERDR_PANE_ID", "")
+    if not PANE_ID.fullmatch(source):
+        raise LaunchError("HERDR_PANE_ID must be a real pane ID (for example w1:p1)")
+    file_arg, line, col, expected_parent, expected_file, handoff, nonce = args
+    if not DEV_INO.fullmatch(expected_parent):
+        raise LaunchError("PARENT_ID must be DEV:INO of the file's directory")
+    if not DEV_INO.fullmatch(expected_file):
+        raise LaunchError("FILE_ID must be DEV:INO of the file")
+    if not NONCE.fullmatch(nonce):
+        raise LaunchError("NONCE must be the sender's 32 lowercase hex digits")
+    if not file_arg or unsafe_path(file_arg):
+        raise LaunchError("FILE must name an existing regular UTF-8 file without control characters")
+    if not re.fullmatch(r"[0-9]+", line) or not re.fullmatch(r"[0-9]+", col):
+        raise LaunchError("LINE and COL must be positive integers")
+    if not 1 <= int(line) <= (sys.maxsize if edit else 0xFFFFFFFF):
+        raise LaunchError("LINE is outside the supported range (Reviewr: 1..4294967295)")
+    if not 1 <= int(col) <= sys.maxsize:
+        raise LaunchError("COL must be a positive platform integer")
+    file = checked_target(file_arg, expected_parent, expected_file)
+    handoff = checked_handoff(handoff)
+    program = program_path(edit)
+    manager = os.environ.get("HERDR_BIN_PATH") or "herdr"
+    output = run_herdr(manager, "pane", "split", "--pane", source,
+                       "--direction", "right", "--cwd", str(file.parent), "--no-focus")
+    try:
+        pane = json.loads(output)["result"]["pane"]["pane_id"]
+    except (ValueError, KeyError, TypeError) as error:
+        raise LaunchError("HerdR split response omitted a valid new pane ID") from error
+    if not isinstance(pane, str) or not PANE_ID.fullmatch(pane) or pane == source:
+        raise LaunchError("HerdR split response did not identify a distinct real pane")
+    if pane.split(":")[0] != source.split(":")[0]:
+        raise LaunchError("HerdR split response identified a different workspace; refusing it")
+    identities = ["--expect-parent", expected_parent, "--expect-file", expected_file,
+                  "--handoff", handoff, "--handoff-nonce", nonce]
+    if edit:
+        command = [program, "--single-file-at", str(file), str(int(line)), str(int(col)),
+                   *identities]
+    else:
+        # Reviewr's anchor is a line, not a character/cursor position.
+        command = [program, "--file", str(file), "--line", str(int(line)), *identities]
+    try:
+        run_herdr(manager, "pane", "run", pane, "exec " + shlex.join(command))
+    except LaunchError as error:
+        try:
+            run_herdr(manager, "pane", "close", pane)
+        except LaunchError as cleanup:
+            raise LaunchError(f"{error}; cleanup also failed: {cleanup}") from error
+        raise
+
+
+def main():
+    """Dispatch both symlink entry points without Markdown recursion."""
+    edit = Path(sys.argv[0]).name in ("edit-original", "herdr-review-edit-original")
+    try:
+        launch(sys.argv[1:], edit=edit)
+    except (LaunchError, OSError, ValueError, RuntimeError) as error:
+        print(f"{'herdr-review-edit-original' if edit else 'herdr-review-last-markdown'}: {error}",
+              file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -29,6 +29,7 @@
 package editor
 
 import (
+	"bytes"
 	"fmt"
 	"image"
 	_ "image/gif"  // register decoder so image.Decode handles .gif
@@ -77,6 +78,28 @@ func decodeImageFile(path string) (image.Image, string, error) {
 		return nil, "", fmt.Errorf("decode %s: %w", filepath.Base(path), err)
 	}
 	return img, format, nil
+}
+
+// newBoundImageTab builds a read-only preview from bytes already read through
+// the identity-checked, no-follow descriptor (NewBoundTab). It never touches the
+// path: Save refuses image tabs, and Reload refuses bound ones, so a later swap
+// cannot change what the pane shows. It holds no descriptors.
+func newBoundImageTab(path string, data []byte, info os.FileInfo) (*Tab, error) {
+	img, format, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("decode %s: %w", filepath.Base(path), err)
+	}
+	t := &Tab{
+		Path:          path,
+		Buffer:        NewBuffer(""),
+		Mtime:         info.ModTime(),
+		Mode:          imageMode,
+		Image:         img,
+		ImageFmt:      format,
+		originalBound: true,
+	}
+	t.initUndo()
+	return t, nil
 }
 
 // resizeNearest produces a w×h RGBA copy of src using nearest-neighbour

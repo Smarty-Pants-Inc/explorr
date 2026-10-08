@@ -99,42 +99,55 @@ func checkJQOnPath() error {
 	return nil
 }
 
+// isolatedHerdREnvironment prevents capability probes from reaching a live session.
 func isolatedHerdREnvironment(root string) []string {
-	env := withoutEnvironmentKeys(
-		append([]string(nil), os.Environ()...),
-		"HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "HERDR_CONFIG_PATH", "HERDR_SOCKET_PATH",
+	env := make([]string, 0, len(os.Environ()))
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "HERDR_") {
+			env = append(env, entry)
+		}
+	}
+	env = withoutEnvironmentKeys(env,
+		"HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR",
 	)
 	return append(env,
 		"HOME="+filepath.Join(root, "home"),
 		"XDG_CONFIG_HOME="+filepath.Join(root, "config"),
 		"XDG_DATA_HOME="+filepath.Join(root, "data"),
 		"XDG_STATE_HOME="+filepath.Join(root, "state"),
+		"XDG_CACHE_HOME="+filepath.Join(root, "cache"),
+		"XDG_RUNTIME_DIR="+filepath.Join(root, "runtime"),
 		"HERDR_CONFIG_PATH="+filepath.Join(root, "config", "herdr", "config.toml"),
 		"HERDR_SOCKET_PATH="+filepath.Join(root, "offline.sock"),
 	)
 }
 
+// checkHerdRCapabilities validates source-pane targeting and the actual plugin schema offline.
 func checkHerdRCapabilities() error {
-	help, err := runHerdR("pane", "split", "--help")
-	if err != nil {
-		return fmt.Errorf("Smarty HerdR with pane split --workspace is required: %w", err)
-	}
-	hasWorkspace := false
-	for _, field := range strings.Fields(string(help)) {
-		if field == "--workspace" || strings.HasPrefix(field, "--workspace=") {
-			hasWorkspace = true
-			break
-		}
-	}
-	if !hasWorkspace {
-		return errors.New("Smarty HerdR with pane split --workspace is required")
-	}
-
+	const required = "Smarty HerdR 0.9.1+ with targeted split plugin panes and local file-link handlers is required"
 	root, err := os.MkdirTemp("", "explorr-herdr-capabilities-*")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(root)
+
+	env := isolatedHerdREnvironment(root)
+	help, err := runHerdRWithEnvironment(env, "plugin", "pane", "open", "--help")
+	if err != nil {
+		return fmt.Errorf("%s: %w", required, err)
+	}
+	for _, flag := range []string{"--placement", "--target-pane", "--direction"} {
+		found := false
+		for _, field := range strings.Fields(string(help)) {
+			if field == flag || strings.HasPrefix(field, flag+"=") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("%s (missing plugin pane open %s)", required, flag)
+		}
+	}
 
 	pluginDir := filepath.Join(root, "plugin")
 	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
@@ -143,7 +156,7 @@ func checkHerdRCapabilities() error {
 	probe := `id = "` + herdrCapabilityProbeID + `"
 name = "Explorr capability probe"
 version = "0.0.0"
-min_herdr_version = "0.8.0"
+min_herdr_version = "0.9.1"
 platforms = ["linux", "macos", "windows"]
 
 [[actions]]
@@ -160,15 +173,14 @@ action = "open-file"
 [[panes]]
 id = "explorer"
 title = "explorer"
-placement = "workspace_right"
+placement = "split"
 command = ["true"]
 `
 	if err := os.WriteFile(filepath.Join(pluginDir, "herdr-plugin.toml"), []byte(probe), 0o644); err != nil {
 		return err
 	}
-	env := isolatedHerdREnvironment(root)
-	if _, err := runHerdRWithEnvironment(env, "plugin", "link", pluginDir); err != nil {
-		return fmt.Errorf("Smarty HerdR 0.8.0+ with workspace-right plugin panes and local file-link handlers is required: %w", err)
+	if _, err := runHerdRWithEnvironment(env, "plugin", "link", pluginDir, "--disabled"); err != nil {
+		return fmt.Errorf("%s: %w", required, err)
 	}
 	output, err := runHerdRWithEnvironment(env, "plugin", "list", "--plugin", herdrCapabilityProbeID, "--json")
 	if err != nil {
@@ -179,16 +191,21 @@ command = ["true"]
 		return fmt.Errorf("decode HerdR capability probe: %w", err)
 	}
 	for _, plugin := range registry.Result.Plugins {
-		if plugin.PluginID != herdrCapabilityProbeID || len(plugin.LinkHandlers) == 0 {
+		if plugin.PluginID != herdrCapabilityProbeID {
 			continue
 		}
-		for _, pane := range plugin.Panes {
-			if pane.Placement == "workspace_right" {
-				return nil
+		for _, handler := range plugin.LinkHandlers {
+			if handler.ID != "local-file" || handler.Pattern != "^file://" || handler.Action != "open-file" {
+				continue
+			}
+			for _, pane := range plugin.Panes {
+				if pane.ID == "explorer" && pane.Placement == "split" {
+					return nil
+				}
 			}
 		}
 	}
-	return errors.New("Smarty HerdR with workspace-right plugin panes and local file-link handlers is required")
+	return errors.New(required)
 }
 
 func preflightHerdRPlugin() error {
@@ -249,10 +266,13 @@ type herdrPluginList struct {
 			PluginID     string `json:"plugin_id"`
 			ManifestPath string `json:"manifest_path"`
 			Panes        []struct {
+				ID        string `json:"id"`
 				Placement string `json:"placement"`
 			} `json:"panes"`
 			LinkHandlers []struct {
-				ID string `json:"id"`
+				ID      string `json:"id"`
+				Pattern string `json:"pattern"`
+				Action  string `json:"action"`
 			} `json:"link_handlers"`
 		} `json:"plugins"`
 	} `json:"result"`

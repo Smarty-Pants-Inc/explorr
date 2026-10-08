@@ -1,0 +1,21 @@
+Explorr downstream Reviewr integration
+
+Upstream: herdr-reviewr by Dmitry Persiyanov
+Repository: https://github.com/persiyanov/herdr-reviewr
+Source tag: v0.30.1
+Archive: https://codeload.github.com/persiyanov/herdr-reviewr/tar.gz/refs/tags/v0.30.1
+SHA-256: a34e286da3defb9edcf52ed44d1178c591ca443a99c63e1d4101505712b15694
+Copyright (c) 2026 Dmitry Persiyanov
+License: MIT (the complete grant and disclaimer are in LICENSE)
+
+upstream.json is the machine-readable build pin. install.sh verifies the
+archive before extracting, applies upstream.patch with -p1, and builds using
+the upstream Cargo.lock. upstream.patch is maintained downstream; the staged
+binary is modified software, not an unmodified upstream release. This source
+archive pin does not claim that transitive dependencies have been vendored.
+
+The Python launch helpers and build recipe are downstream additions by
+Smarty Pants, Inc. They do not install or activate the upstream Reviewr HerdR
+plugin, contact upstream maintainers, or alter HerdR fleet state. The existing
+Explorr local-file link handler launches the patched viewer. Preserve this
+notice and the MIT license when redistributing the binary or helper bundle.
