@@ -178,8 +178,8 @@ func (f *fakeHerdRReceiver) run(bin string, args ...string) ([]byte, error) {
 	switch {
 	case len(args) >= 2 && args[0] == "pane" && args[1] == "split":
 		return []byte(`{"result":{"pane":{"pane_id":"wA:p8"}}}`), nil
-	case len(args) == 4 && args[0] == "pane" && args[1] == "run":
-		f.args = parseReceiverCommand(f.t, args[3])
+	case len(args) == 5 && args[0] == "pane" && args[1] == "run" && args[2] == "--allow-cross-pane":
+		f.args = parseReceiverCommand(f.t, args[4])
 		f.fixture.swap(f.t, f.kind)
 		f.ran = true
 		f.app, f.err = NewIsolatedSingleFileAtExpecting(f.args.file, f.args.line, f.args.col, f.args.parent, f.args.fileID, f.args.h, f.args.nonce)

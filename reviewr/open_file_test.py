@@ -24,12 +24,13 @@ if args[:2] == ['pane', 'split']:
         sys.exit(7)
     print(os.environ.get('SPLIT_REPLY', json.dumps({'result': {'pane': {'pane_id': 'wA:p8'}}})))
 elif args[:2] == ['pane', 'run']:
+    command = args[4] if args[2] == '--allow-cross-pane' else args[3]
     if os.environ.get('FAIL_RUN'):
         print('run stdout detail')
         print('run stderr detail', file=sys.stderr)
         sys.exit(9)
     if os.environ.get('EXECUTE_COMMAND'):
-        sys.exit(subprocess.run(['/bin/sh', '-c', args[3]]).returncode)
+        sys.exit(subprocess.run(['/bin/sh', '-c', command]).returncode)
 elif args[:2] == ['pane', 'close'] and os.environ.get('FAIL_CLOSE'):
     print('close failed', file=sys.stderr)
     sys.exit(10)
@@ -123,8 +124,8 @@ class OpenFileTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.calls()[0], ['pane', 'split', '--pane', 'wA:p7',
                          '--direction', 'right', '--cwd', str(self.file.parent), '--no-focus'])
-        self.assertEqual(self.calls()[1][:3], ['pane', 'run', 'wA:p8'])
-        self.assertEqual(shlex.split(self.calls()[1][3]),
+        self.assertEqual(self.calls()[1][:4], ['pane', 'run', '--allow-cross-pane', 'wA:p8'])
+        self.assertEqual(shlex.split(self.calls()[1][4]),
                          ['exec', str(self.reviewr), '--file', str(self.file), '--line', '2',
                           *self.identities(self.file)])
         self.assertFalse((self.base / '.git').exists())
@@ -167,7 +168,7 @@ class OpenFileTests(unittest.TestCase):
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.calls()[0][3], 'w1:pA')
-        self.assertEqual(self.calls()[1][:3], ['pane', 'run', 'w1:pZ1'])
+        self.assertEqual(self.calls()[1][:4], ['pane', 'run', '--allow-cross-pane', 'w1:pZ1'])
         for origin in ['w1:pa', 'w1:pI', 'w1:pO', 'w1:pL', 'w1:pU']:
             with self.subTest(origin=origin):
                 self.log.unlink(missing_ok=True)
@@ -192,7 +193,7 @@ class OpenFileTests(unittest.TestCase):
         self.assertEqual(self.calls()[2], ['pane', 'close', 'wA:p8'])
         self.assertIn('run stdout detail', result.stderr)
         self.assertIn('run stderr detail', result.stderr)
-        self.assertIn('pane run wA:p8', result.stderr)
+        self.assertIn('pane run --allow-cross-pane wA:p8', result.stderr)
         self.assertEqual(len(self.calls()), 3)
 
     def test_cleanup_failure_is_reported_without_retry(self):
@@ -231,8 +232,8 @@ class OpenFileTests(unittest.TestCase):
         self.assertEqual(json.loads(self.program_log.read_text()),
                          [str(self.explorr), '--single-file-at', str(self.file), '2', '13',
                           *self.identities(self.file)])
-        self.assertNotIn('--open-at', self.calls()[1][3])
-        self.assertNotIn('--herdr-open', self.calls()[1][3])
+        self.assertNotIn('--open-at', self.calls()[1][4])
+        self.assertNotIn('--herdr-open', self.calls()[1][4])
 
     def test_both_modes_refuse_replaced_parent_before_split(self):
         # The sender holds current/; a new directory now sits at that path with a
@@ -378,12 +379,12 @@ class OpenFileTests(unittest.TestCase):
         self.write_executable(target, FAKE_PROGRAM)
         self.env['HERDR_PLUGIN_ROOT'] = str(plugin)
         self.assertEqual(self.invoke(edit=True).returncode, 0)
-        self.assertEqual(shlex.split(self.calls()[1][3])[1], str(target))
+        self.assertEqual(shlex.split(self.calls()[1][4])[1], str(target))
         override = self.base / 'absolute explorr'
         self.write_executable(override, FAKE_PROGRAM)
         self.env['EXPLORR_BIN_PATH'] = str(override)
         self.assertEqual(self.invoke(edit=True).returncode, 0)
-        self.assertEqual(shlex.split(self.calls()[3][3])[1], str(override))
+        self.assertEqual(shlex.split(self.calls()[3][4])[1], str(override))
 
     def test_missing_explorr_fails_before_split(self):
         self.explorr.unlink()
@@ -409,7 +410,7 @@ class OpenFileTests(unittest.TestCase):
                                  self.ident(os.lstat(self.file)), str(self.handoff), NONCE],
                                 env=self.env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(shlex.split(self.calls()[1][3])[1], str(plugin_bin / 'herdr-reviewr'))
+        self.assertEqual(shlex.split(self.calls()[1][4])[1], str(plugin_bin / 'herdr-reviewr'))
 
     def test_herdr_path_fallback_uses_argv(self):
         del self.env['HERDR_BIN_PATH']
@@ -453,7 +454,7 @@ class OpenFileTests(unittest.TestCase):
                 self.assertNotEqual(self.invoke(line=line, col=col).returncode, 0)
                 self.assertEqual(self.calls(), [])
         self.assertEqual(self.invoke(line='4294967295').returncode, 0)
-        command = shlex.split(self.calls()[1][3])
+        command = shlex.split(self.calls()[1][4])
         self.assertEqual(command[command.index('--line') + 1], '4294967295')
 
 

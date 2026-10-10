@@ -217,7 +217,7 @@ func launchHerdRSplit(run HerdRRunner, herdrBin, executable string, s *handoff.S
 		" " + fmt.Sprint(max(1, line)) + " " + fmt.Sprint(max(1, col)) +
 		" --expect-parent " + shellQuote(s.ParentID) + " --expect-file " + shellQuote(s.FileID) +
 		" --handoff " + shellQuote(s.Dir) + " --handoff-nonce " + shellQuote(s.Nonce)
-	if _, err := run(herdrBin, "pane", "run", paneID, command); err != nil {
+	if _, err := run(herdrBin, "pane", "run", "--allow-cross-pane", paneID, command); err != nil {
 		_, _ = run(herdrBin, "pane", "close", paneID)
 		return err
 	}

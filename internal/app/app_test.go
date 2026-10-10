@@ -3003,7 +3003,7 @@ func TestOpenFileInHerdRSplitTargetsCapturedSourcePane(t *testing.T) {
 printf '%s\n' "$*" >> "$HERDR_TEST_LOG"
 case "$1:$2" in
   pane:split) printf '%s\n' '{"result":{"pane":{"pane_id":"wA:p2"}}}' ;;
-  pane:run) h=${4##*"--handoff '"}; h=${h%%"'"*}; n=${4##*"--handoff-nonce '"}; n=${n%"'"}; f=${4##*"--expect-file '"}; f=${f%%"'"*}; printf '%s %s\n' "$n" "$f" > "$h/ack"; printf '%s\n' '{"result":{}}' ;;
+  pane:run) cmd=$4; [ "$3" = "--allow-cross-pane" ] && cmd=$5; h=${cmd##*"--handoff '"}; h=${h%%"'"*}; n=${cmd##*"--handoff-nonce '"}; n=${n%"'"}; f=${cmd##*"--expect-file '"}; f=${f%%"'"*}; printf '%s %s\n' "$n" "$f" > "$h/ack"; printf '%s\n' '{"result":{}}' ;;
   *) printf '%s\n' '{"result":{}}' ;;
 esac
 `
@@ -3039,7 +3039,7 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantRun := "pane run wA:p2 exec " + shellQuote(executable) + " --single-file-at " + shellQuote(file) + " 12 4 --expect-parent "
+	wantRun := "pane run --allow-cross-pane wA:p2 exec " + shellQuote(executable) + " --single-file-at " + shellQuote(file) + " 12 4 --expect-parent "
 	if !strings.HasPrefix(calls[1], wantRun) || !strings.Contains(calls[1], " --expect-file '") || !strings.Contains(calls[1], " --handoff '") {
 		t.Fatalf("run call = %q, want %q", calls[1], wantRun)
 	}
@@ -3097,7 +3097,7 @@ esac
 	if len(calls) != 3 {
 		t.Fatalf("calls = %q, want split/run/close", calls)
 	}
-	if !strings.HasPrefix(calls[1], "pane run wA:p2 ") {
+	if !strings.HasPrefix(calls[1], "pane run --allow-cross-pane wA:p2 ") {
 		t.Fatalf("run call = %q", calls[1])
 	}
 	if calls[2] != "pane close wA:p2" {

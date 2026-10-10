@@ -173,7 +173,7 @@ def launch(args, edit=False):
         # Reviewr's anchor is a line, not a character/cursor position.
         command = [program, "--file", str(file), "--line", str(int(line)), *identities]
     try:
-        run_herdr(manager, "pane", "run", pane, "exec " + shlex.join(command))
+        run_herdr(manager, "pane", "run", "--allow-cross-pane", pane, "exec " + shlex.join(command))
     except LaunchError as error:
         try:
             run_herdr(manager, "pane", "close", pane)
