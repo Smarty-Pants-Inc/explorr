@@ -47,7 +47,7 @@ func TestOpenFileInHerdRSplitIgnoresAmbientScope(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			log := fakeExplorerHerdR(t, `case "$1:$2" in
   pane:split) printf '%s\n' '{"result":{"pane":{"pane_id":"wA:p8","workspace_id":"wA","tab_id":"wA:t1"}}}' ;;
-  pane:run) h=${4##*"--handoff '"}; h=${h%%"'"*}; n=${4##*"--handoff-nonce '"}; n=${n%"'"}; f=${4##*"--expect-file '"}; f=${f%%"'"*}; printf '%s %s\n' "$n" "$f" > "$h/ack"; printf '%s\n' '{"result":{}}' ;;
+  pane:run) cmd=$4; [ "$3" = "--allow-cross-pane" ] && cmd=$5; h=${cmd##*"--handoff '"}; h=${h%%"'"*}; n=${cmd##*"--handoff-nonce '"}; n=${n%"'"}; f=${cmd##*"--expect-file '"}; f=${f%%"'"*}; printf '%s %s\n' "$n" "$f" > "$h/ack"; printf '%s\n' '{"result":{}}' ;;
   *) printf '%s\n' '{"result":{}}' ;;
 esac
 `)
@@ -68,7 +68,7 @@ esac
 			}
 			lines := strings.Split(strings.TrimSpace(string(calls)), "\n")
 			want := "pane split --pane wA:p7 --direction right --cwd " + filepath.Dir(file) + " --no-focus"
-			if len(lines) != 2 || lines[0] != want || !strings.HasPrefix(lines[1], "pane run wA:p8 exec ") {
+			if len(lines) != 2 || lines[0] != want || !strings.HasPrefix(lines[1], "pane run --allow-cross-pane wA:p8 exec ") {
 				t.Fatalf("calls = %q; want explicit origin split/run without focus or snapshot fallback", lines)
 			}
 		})
@@ -115,7 +115,7 @@ func TestOpenFileInHerdRSplitStaleOriginDoesNotRetry(t *testing.T) {
 func TestExplorerActivationUsesOwnPane(t *testing.T) {
 	log := fakeExplorerHerdR(t, `case "$1:$2" in
   pane:split) printf '%s\n' '{"result":{"pane":{"pane_id":"wA:p8"}}}' ;;
-  pane:run) h=${4##*"--handoff '"}; h=${h%%"'"*}; n=${4##*"--handoff-nonce '"}; n=${n%"'"}; f=${4##*"--expect-file '"}; f=${f%%"'"*}; printf '%s %s\n' "$n" "$f" > "$h/ack"; printf '%s\n' '{"result":{}}' ;;
+  pane:run) cmd=$4; [ "$3" = "--allow-cross-pane" ] && cmd=$5; h=${cmd##*"--handoff '"}; h=${h%%"'"*}; n=${cmd##*"--handoff-nonce '"}; n=${n%"'"}; f=${cmd##*"--expect-file '"}; f=${f%%"'"*}; printf '%s %s\n' "$n" "$f" > "$h/ack"; printf '%s\n' '{"result":{}}' ;;
   *) printf '%s\n' '{"result":{}}' ;;
 esac
 `)

@@ -215,8 +215,8 @@ func TestNonMarkdownLinkRouteHandoff(t *testing.T) {
 				if len(args) >= 2 && args[1] == "split" {
 					return []byte(`{"result":{"pane":{"pane_id":"wA:p8"}}}`), nil
 				}
-				if len(args) == 4 && args[1] == "run" {
-					command = args[3]
+				if len(args) == 5 && args[1] == "run" && args[2] == "--allow-cross-pane" {
+					command = args[4]
 					fx.swap(t, kind)
 					w := strings.Fields(command)
 					if len(w) != 14 || w[2] != "--single-file-at" || w[6] != "--expect-parent" || w[8] != "--expect-file" || w[10] != "--handoff" || w[12] != "--handoff-nonce" {
