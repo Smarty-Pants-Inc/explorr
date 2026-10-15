@@ -33,6 +33,10 @@ queue_rules:
       - -check-failure = smarty-ci
     merge_conditions:
       # An opt-out added after queueing must stop the merge.
+      - base = main
+      - -draft
+      - -title ~= (?i)(do not (land|merge)|never land)
+      - check-success = review/astra
       - -label ~= (?i)^(hold|do[ -]?not[ -]?merge|dnm|freeze|frozen)$
       - -label ~= (?i)^(wip|work[ -]?in[ -]?progress|do[ -]?not[ -]?land|never[ -]?land)$
       - -label = hold
