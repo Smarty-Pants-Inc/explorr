@@ -29,6 +29,7 @@ queue_rules:
           - -label = needs-security-pass
           - check-success = review/security
       - check-success = review/astra
+      - -check-failure = review/security  # a failed security verdict refuses admission, label or not
       - check-success = smarty-ci
       - -check-failure = smarty-ci
     merge_conditions:
