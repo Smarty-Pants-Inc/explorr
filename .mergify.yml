@@ -1,10 +1,15 @@
+# Follow smarty-dev's .mergify.yml auto-queue pattern for ready PRs.
+# `hold` is the opt-out; every queue keeps the same required checks.
+merge_protections_settings:
+  auto_merge_conditions: true
+
 merge_queue:
   mode: serial
   max_parallel_checks: 2
   reset_on_external_merge: always
 
 # The PR, its required checks and this queue are the review (smarty-dev docs/factory.md).
-# The Astra reviewer queues a ready PR after its success verdict. `hold` and do-not-land/merge
+# Mergify queues a ready PR once queue_conditions pass. `hold` and do-not-land/merge
 # or never-land titles keep a PR out. Not a GitHub ruleset (smarty-dev#440).
 queue_rules:
   - name: default
@@ -13,14 +18,32 @@ queue_rules:
     checks_timeout: 30 min
     merge_method: merge
     queue_conditions:
+      - -label ~= (?i)^(hold|do[ -]?not[ -]?merge|dnm|freeze|frozen)$
+      - -label ~= (?i)^(wip|work[ -]?in[ -]?progress|do[ -]?not[ -]?land|never[ -]?land)$
       - base = main
       - -draft
       - -label = hold
       - -title ~= (?i)(do not (land|merge)|never land)
+      # A labeled PR waits for a security success on its exact head before auto-queueing.
+      - or:
+          - -label = needs-security-pass
+          - check-success = review/security
       - check-success = review/astra
+      - -check-failure = review/security  # a failed security verdict refuses admission, label or not
       - check-success = smarty-ci
       - -check-failure = smarty-ci
     merge_conditions:
+      # Label and title opt-outs added after queueing stop the merge.
+      # Review statuses here only refuse a FAILED review: an in-place or batch update
+      # makes a new head with no review statuses (smarty-dev#455).
+      # queue_conditions require the reviews on the reviewed head.
+      - base = main
+      - -title ~= (?i)(do not (land|merge)|never land)
+      - -check-failure = review/astra
+      - -label ~= (?i)^(hold|do[ -]?not[ -]?merge|dnm|freeze|frozen)$
+      - -label ~= (?i)^(wip|work[ -]?in[ -]?progress|do[ -]?not[ -]?land|never[ -]?land)$
+      - -label = hold
+      - -check-failure = review/security
       - check-success = smarty-ci
       - -check-failure = smarty-ci
 
