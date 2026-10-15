@@ -19,10 +19,15 @@ queue_rules:
     merge_method: merge
     queue_conditions:
       - -label ~= (?i)^(hold|do[ -]?not[ -]?merge|dnm|freeze|frozen)$
+      - -label ~= (?i)^(wip|work[ -]?in[ -]?progress|do[ -]?not[ -]?land|never[ -]?land)$
       - base = main
       - -draft
       - -label = hold
       - -title ~= (?i)(do not (land|merge)|never land)
+      # A labeled PR waits for a security success on its exact head before auto-queueing.
+      - or:
+          - -label = needs-security-pass
+          - check-success = review/security
       - check-success = review/astra
       - check-success = smarty-ci
       - -check-failure = smarty-ci
